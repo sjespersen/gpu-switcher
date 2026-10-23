@@ -23,7 +23,7 @@ jobs:
         run: |
           shellcheck local/local-ai
           printf 'API_KEY=x\nNAME=x\nPORT=8005\nSTUDIO_PORT=8008\nIDLE_MINUTES=30\nSTATE_DIR=/s\nMODELS_DIR=/m\nMEDIA_DIR=/d\nCHAT_REPO=r\nCHAT_FILE=f\nCHAT_NAME=n\nCHAT_TITLE=t\nCHAT_CONTEXT=4096\n' >/tmp/local.env
-          UID=1000 GID=1000 TZ=UTC docker compose --env-file /tmp/local.env -f local/compose.yaml --profile '*' config -q
+          env UID=1000 GID=1000 TZ=UTC docker compose --env-file /tmp/local.env -f local/compose.yaml --profile '*' config -q
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
