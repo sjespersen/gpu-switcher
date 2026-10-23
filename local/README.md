@@ -16,7 +16,7 @@ Then:
 
 - `http://127.0.0.1:8005`: the page (which model has the GPU; switch, stop)
 - `http://127.0.0.1:8005/v1`: the OpenAI-compatible API, for your editor, agent or chat app.
-  Use model `qwen3.8-27b` (or your `CHAT_NAME`) and the key as the API key.
+  Use model `qwen3.8-27b` (or your `CHAT_NAME`) and the key as the API key ([Hermes](#hermes)).
 - `http://127.0.0.1:8008`: the [Studio](https://github.com/sjespersen/studio), if it's on
 
 `local-ai status` shows what runs. `local-ai down` stops everything. After changing
@@ -70,6 +70,34 @@ work, slowly; MiniMax H3 video at the Studio's sizes needs an NVIDIA card with 1
 **How big a model?** The default chat model (Qwen3.8-27B at 3 bits) needs about 16 GB for
 itself plus its context. On a 16 GB Mac, pick a smaller GGUF (`CHAT_REPO`, `CHAT_FILE`; and
 set `CHAT_NAME` to what you want to call it).
+
+## Hermes
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) on the same computer, as a named
+custom provider in `~/.hermes/config.yaml`. `key_cmd` reads the key from `local-ai`, so it
+isn't copied anywhere (use the path of your checkout):
+
+```yaml
+model:
+  default: qwen3.8-27b
+  provider: local-ai
+providers:
+  local-ai:
+    name: local-ai
+    base_url: http://127.0.0.1:8005/v1
+    key_cmd: ~/gpu-switcher/local/local-ai key
+    models:
+      qwen3.8-27b: {}
+    # Hermes sends no thinking level to custom endpoints, and Qwen 3.8 then thinks at the
+    # highest; llama.cpp takes it as a chat template argument.
+    extra_body:
+      chat_template_kwargs:
+        reasoning_effort: medium
+```
+
+The first request starts the chat model, so it takes as long as loading it. Everything listens
+on 127.0.0.1 only: a Hermes on another machine (or in a container without host networking)
+can't reach it; for that, run the switcher on a server.
 
 ## Settings (`~/.config/gpu-switcher/local.env`)
 
