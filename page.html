@@ -328,7 +328,8 @@ async function load() {
   document.getElementById('hold').textContent = d.hold ? `${d.hold} is using the GPU: switching is off until it's done.` : '';
   document.getElementById('hold').hidden = !d.hold;
   setHTML('now', nowCard(d, svcs));
-  setHTML('choices', svcs.map(s => choice(s, d)).join(''));
+  // A variant (another model on the same engine) has no card: requests naming its model start it.
+  setHTML('choices', svcs.filter(s => !s.variant_of).map(s => choice(s, d)).join(''));
   setHTML('vitals', vitals(d));
   setHTML('api-models', svcs.filter(s => s.models && s.models.length)
     .map(s => `<span class="chip">${esc(s.models[0])}</span>`).join(''));

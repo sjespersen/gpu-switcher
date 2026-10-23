@@ -147,6 +147,9 @@ def docker_services():
             "order": int(labels.get("homelab.ai.order", "9")),
             # Never stopped for a switch; it gives the GPU back by unloading its models.
             "always_on": labels.get("homelab.ai.always-on") == "true",
+            # Another model on the same engine (that service's id): no card of its own on the page,
+            # started by its model name like the others.
+            "variant_of": labels.get("homelab.ai.variant-of", ""),
             "state": c["State"],  # running, exited, created, ...
             "health": health,     # starting, healthy, unhealthy or None
             "started": detail["State"].get("StartedAt"),
@@ -188,6 +191,7 @@ def process_services():
             "models": [m.strip().lower() for m in e.get("models", []) if m.strip()],
             "order": int(e.get("order", i + 1)),
             "always_on": bool(e.get("always_on")),
+            "variant_of": e.get("variant_of", ""),
             "state": "running" if running else ("exited" if p is not None else "created"),
             "health": answers(host, port, e.get("health")) if running else None,
             "started": proc_started.get(sid),
@@ -532,15 +536,20 @@ def started_at(service):
 
 def chat_target(model, all_services):
     """The chat service for a request's model name: the service whose homelab.ai.model names
-    it (or a longer name starting with it, like Strata's qwen3.8-flash-next-iq3_s), else the
-    chat model that runs, else the last one used (kept across restarts), else the first."""
+    it (or a longer name starting with it, like Strata's qwen3.8-flash-next-iq3_s; an exact name,
+    then the longest such start wins, so a variant's qwen3.8-flash-next-coder isn't Strata's), else
+    the chat model that runs, else the last one used (kept across restarts), else the first."""
     chat = [s for s in all_services if s["models"]]
     if not chat:
         return None
     name = model.strip().lower() if isinstance(model, str) else ""
-    for s in chat:
-        if name and (name == s["id"] or any(name == m or name.startswith(m + "-") for m in s["models"])):
-            return s
+    if name:
+        exact = [s for s in chat if name == s["id"] or name in s["models"]]
+        if exact:
+            return exact[0]
+        starts = [(len(m), s) for s in chat for m in s["models"] if name.startswith(m + "-")]
+        if starts:
+            return max(starts, key=lambda x: x[0])[1]
     for s in chat:
         if s["state"] == "running":
             return s

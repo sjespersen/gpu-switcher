@@ -94,6 +94,7 @@ The labels:
 | `homelab.ai.site` | A link for its Open button (a key in `LINKS_FILE`) |
 | `homelab.ai.files` | Its model folder under `MODELS_DIR`, dropped from the page cache when another service starts |
 | `homelab.ai.always-on` | `true` for Ollama (see above) |
+| `homelab.ai.variant-of` | Another service's id: another model on the same engine (e.g. a fine-tune). No card of its own on the page; API requests naming its model start it |
 
 (The `homelab.` prefix is from where it came from; it stays so existing stacks keep working.)
 
@@ -111,7 +112,7 @@ API_KEY=$(openssl rand -hex 24) SERVICES_FILE=services.json STATE_FILE=~/.local/
 ```
 
 Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as a list,
-`order`, `site`, `files`, `always_on`), and also:
+`order`, `site`, `files`, `always_on`, `variant_of`), and also:
 
 | Key | What |
 |---|---|
