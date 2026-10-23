@@ -7,6 +7,7 @@
 #   local-ai status   what runs
 #   local-ai key      print the API key (the page's login, the API's Bearer token)
 # Settings: ~/.config/gpu-switcher/local.env (see local/README.md).
+# shellcheck disable=SC2153  # the settings (NAME, PORT ...) come from local.env, see load_config
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(dirname "$here")
@@ -162,7 +163,7 @@ stop_agent() {
 
 # The services file: llama-server from Homebrew, and ComfyUI if there is one.
 write_services() {
-  local llama comfy_py
+  local llama
   llama=$(command -v llama-server) || die "no llama-server: brew install llama.cpp"
   python3 - "$STATE_DIR/services.json" "$llama" "${COMFYUI_DIR:-}" <<'PY'
 import json, os, sys
