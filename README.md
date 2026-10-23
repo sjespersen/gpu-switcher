@@ -11,6 +11,10 @@ containers, or without Docker by starting the model servers itself (e.g. on a Ma
 
 Only the Python standard library, one process, no database.
 
+**On your own computer** (Linux with an NVIDIA GPU, or a Mac): `local/local-ai up` sets it up
+with a chat model, ComfyUI and optionally the [Studio](https://github.com/sjespersen/studio),
+all on 127.0.0.1. See [`local/README.md`](local/README.md).
+
 ## How it works
 
 - **Services** are the things that take turns on the GPU: chat models (llama.cpp's
@@ -98,7 +102,8 @@ The labels:
 Point `SERVICES_FILE` at a JSON file with the services as commands, and the switcher runs
 them itself. Each service gets its own process group, so stopping it also stops whatever it
 started, and its output goes to `<id>.log` next to `STATE_FILE`. They stop when the switcher
-stops. See [`services.example.json`](services.example.json):
+stops. A service whose port already answers before it starts is refused, so another program on
+that port can't pass for it. See [`services.example.json`](services.example.json):
 
 ```sh
 API_KEY=$(openssl rand -hex 24) SERVICES_FILE=services.json STATE_FILE=~/.local/state/gpu-switcher/active \
@@ -125,6 +130,7 @@ Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as
 | `LISTEN`, `PORT` | `0.0.0.0`, `8079` | Where the page and the API listen. Use `127.0.0.1` outside a container |
 | `IDLE_MINUTES` | `0` (never) | Stop the chat model after this long without requests |
 | `DOCKER_PROXY` | `socket-proxy:2375` | The Docker socket proxy (with Docker) |
+| `PROJECT` | | With Docker: only this compose project's containers (when other stacks on the host have the labels too) |
 | `SERVICES_FILE` | | The services as commands (without Docker) |
 | `OLLAMA_URL` | `http://ollama:11434` | Where Ollama answers, if there is one |
 | `MODELS_DIR`, `MEDIA_DIR` | `/models`, `/media` | Disks shown on the page; models dropped from the page cache |

@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# gpu-switcher on your own computer, for AI on the machine you work on: no server, everything on
+# 127.0.0.1. Linux with an NVIDIA GPU runs it in Docker (local/compose.yaml); a Mac runs the
+# model servers natively (llama.cpp from Homebrew, your ComfyUI) as a launchd user agent.
+#   local-ai up       write the settings the first time, then start (again, after changes)
+#   local-ai down     stop everything (on a Mac it then stays off after a restart, too)
+#   local-ai status   what runs
+#   local-ai key      print the API key (the page's login, the API's Bearer token)
+# Settings: ~/.config/gpu-switcher/local.env (see local/README.md).
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(dirname "$here")
+conf_dir=${XDG_CONFIG_HOME:-$HOME/.config}/gpu-switcher
+conf=$conf_dir/local.env
+label=io.github.sjespersen.gpu-switcher
+os=$(uname -s)
+
+die() { echo "local-ai: $*" >&2; exit 1; }
+
+write_config() {
+  mkdir -p "$conf_dir"
+  local key comfy_line
+  key=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | cut -c1-40)
+  if [[ $os == Darwin ]]; then
+    comfy_line='# Your ComfyUI checkout (with its venv in .venv), to switch it too; empty: none.
+COMFYUI_DIR=
+# A Studio checkout (github.com/sjespersen/studio), to run it too; empty: none. Needs COMFYUI_DIR.
+STUDIO_DIR='
+  else
+    comfy_line='# ComfyUI, built here from a pinned release (yes/no), and the Studio on top of it (yes/no).
+COMFYUI=yes
+STUDIO=no'
+  fi
+  (umask 077; cat >"$conf" <<EOF
+# gpu-switcher on this computer. Change something, then: local-ai up
+API_KEY=$key
+NAME=$(hostname -s)
+PORT=8005
+STUDIO_PORT=8008
+# Stop the chat model after this many minutes without requests; 0: never.
+IDLE_MINUTES=30
+STATE_DIR=$HOME/.local/share/gpu-switcher
+MODELS_DIR=$HOME/ai-models
+MEDIA_DIR=$HOME/ai-media
+# The chat model: a GGUF on Hugging Face (llama.cpp downloads it on the first start), the name
+# API requests use for it, and its context. The default needs 16 GB of (V)RAM for itself.
+CHAT_REPO=unsloth/Qwen3.8-27B-GGUF
+CHAT_FILE=Qwen3.8-27B-UD-Q3_K_XL.gguf
+CHAT_NAME=qwen3.8-27b
+CHAT_TITLE=Qwen3.8-27B
+CHAT_CONTEXT=32768
+$comfy_line
+# Where the models listen on 127.0.0.1 (macOS only; in Docker they're inside the stack).
+CHAT_PORT=18080
+COMFYUI_PORT=8188
+EOF
+  )
+  echo "Wrote $conf: check the chat model and the folders, then run local-ai up again."
+}
+
+load_config() {
+  [[ -f $conf ]] || die "no settings yet: run local-ai up"
+  # KEY=value lines, read as docker compose reads them (not run as shell code); quotes optional.
+  local line key value
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    key=${line%%=*} value=${line#*=}
+    [[ $value =~ ^\"(.*)\"$ || $value =~ ^\'(.*)\'$ ]] && value=${BASH_REMATCH[1]}
+    export "$key=$value"
+  done <"$conf"
+  TZ=${TZ:-$( (readlink /etc/localtime 2>/dev/null || echo UTC) | sed 's|.*zoneinfo/||')}
+  export TZ
+}
+
+api() {  # api <path>: the switcher's answer, with the key
+  curl -fsS -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:$PORT$1"
+}
+
+# Clones the Studio's ComfyUI node packs (its comfy-nodes.txt, read from stdin) into $1 at their
+# pinned commits.
+node_packs() {
+  local dir=$1 name url commit
+  mkdir -p "$dir"
+  while read -r name url commit; do
+    [[ -n $name && $name != \#* ]] || continue
+    [[ $(git -C "$dir/$name" rev-parse HEAD 2>/dev/null) != "$commit" ]] || continue
+    echo "ComfyUI node pack $name at ${commit:0:7}"
+    [[ -d $dir/$name/.git ]] || git clone -q "$url" "$dir/$name"
+    git -C "$dir/$name" fetch -q origin "$commit"
+    git -C "$dir/$name" -c advice.detachedHead=false checkout -q "$commit"
+  done
+}
+
+# --- Linux: Docker ------------------------------------------------------------------------
+
+compose() {
+  env UID="$(id -u)" GID="$(id -g)" docker compose --env-file "$conf" -f "$here/compose.yaml" "$@"
+}
+
+linux_up() {
+  docker info >/dev/null 2>&1 || die "Docker isn't running (or you're not in the docker group)"
+  nvidia-ctk cdi list 2>/dev/null | grep -q 'nvidia.com/gpu=all' \
+    || die "no NVIDIA GPU for containers: install the NVIDIA Container Toolkit and generate its CDI spec
+  (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)"
+  mkdir -p "$STATE_DIR"/{studio,comfyui/custom_nodes,comfyui/user} "$MODELS_DIR"/{llama.cpp,comfyui} \
+    "$MEDIA_DIR"/{studio,comfyui/input,comfyui/output}
+  local profiles=(--profile chat) up=(switcher socket-proxy)
+  [[ $COMFYUI == yes ]] && profiles+=(--profile comfyui)
+  if [[ $STUDIO == yes ]]; then
+    [[ $COMFYUI == yes ]] || die "STUDIO=yes needs COMFYUI=yes"
+    profiles+=(--profile studio) up+=(studio)
+    compose "${profiles[@]}" pull -q studio
+    local image
+    image=$(compose "${profiles[@]}" config --images studio)
+    docker run --rm --entrypoint cat "$image" /app/comfy-nodes.txt | node_packs "$STATE_DIR/comfyui/custom_nodes"
+    docker run --rm --user "$(id -u):$(id -g)" -v "$STATE_DIR/studio:/data" --entrypoint python "$image" /app/guide.py /data || true
+  fi
+  # The switcher starts the models, so they only need to exist; compose starts the rest.
+  compose "${profiles[@]}" build
+  compose "${profiles[@]}" create
+  compose "${profiles[@]}" up -d "${up[@]}"
+}
+
+linux_down() { compose --profile '*' down; }
+
+# --- macOS: native, a launchd user agent ---------------------------------------------------
+
+plist() { echo "$HOME/Library/LaunchAgents/$1.plist"; }
+xml() { local s=${1//&/&amp;}; s=${s//</&lt;}; echo "${s//>/&gt;}"; }
+
+# write_agent <label> <python> <script> <log> <NAME=value>...: a launchd agent that keeps the
+# script running; the file holds the API key, so only you can read it.
+write_agent() {
+  local name=$1 py=$2 script=$3 log=$4 kv
+  shift 4
+  mkdir -p "$HOME/Library/LaunchAgents"
+  (umask 077; {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo "<plist version=\"1.0\"><dict><key>Label</key><string>$name</string>"
+    echo "<key>ProgramArguments</key><array><string>$py</string><string>$script</string></array>"
+    echo '<key>EnvironmentVariables</key><dict>'
+    for kv in "$@"; do echo "<key>${kv%%=*}</key><string>$(xml "${kv#*=}")</string>"; done
+    echo '</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>'
+    echo "<key>StandardOutPath</key><string>$log</string><key>StandardErrorPath</key><string>$log</string>"
+    echo '</dict></plist>'
+  } >"$(plist "$name")")
+  stop_agent "$name"
+  launchctl bootstrap "gui/$(id -u)" "$(plist "$name")"
+}
+
+# Stops an agent and waits until it's gone: bootout returns while the switcher still stops its
+# models, and a bootstrap before that fails.
+stop_agent() {
+  launchctl bootout "gui/$(id -u)/$1" 2>/dev/null || return 0
+  for _ in $(seq 60); do
+    launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  die "$1 didn't stop"
+}
+
+# The services file: llama-server from Homebrew, and ComfyUI if there is one.
+write_services() {
+  local llama comfy_py
+  llama=$(command -v llama-server) || die "no llama-server: brew install llama.cpp"
+  python3 - "$STATE_DIR/services.json" "$llama" "${COMFYUI_DIR:-}" <<'PY'
+import json, os, sys
+out, llama, comfy = sys.argv[1:4]
+e = os.environ
+services = [{
+    "id": "chat", "title": e["CHAT_TITLE"], "about": "Chat on llama.cpp (Metal)", "kind": "chat",
+    "models": [e["CHAT_NAME"]], "port": int(e.get("CHAT_PORT") or 18080), "health": "/health",
+    "command": [llama, "--hf-repo", e["CHAT_REPO"], "--hf-file", e["CHAT_FILE"], "--alias", e["CHAT_NAME"],
+                "--jinja", "--ctx-size", e["CHAT_CONTEXT"], "--n-gpu-layers", "99", "--flash-attn", "on",
+                "--host", "127.0.0.1", "--port", e.get("CHAT_PORT") or "18080"],
+    "env": {"LLAMA_CACHE": os.path.join(e["MODELS_DIR"], "llama.cpp")},
+}]
+if comfy:
+    py = os.path.join(comfy, ".venv", "bin", "python")
+    services.append({
+        "id": "comfyui", "title": "ComfyUI", "about": "Images and video (MPS)", "kind": "image",
+        "port": int(e.get("COMFYUI_PORT") or 8188), "health": "/system_stats", "cwd": comfy,
+        "command": [py if os.path.exists(py) else "python3", "main.py", "--listen", "127.0.0.1",
+                    "--port", e.get("COMFYUI_PORT") or "8188"],
+    })
+with open(out, "w") as f:
+    json.dump({"services": services}, f, indent=1)
+PY
+}
+
+mac_up() {
+  local py
+  py=$(command -v python3) || die "no python3: brew install python"
+  "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "$py is too old: brew install python (3.11 or newer)"
+  [[ -z ${COMFYUI_DIR:-} || -f $COMFYUI_DIR/main.py ]] || die "COMFYUI_DIR=$COMFYUI_DIR has no main.py"
+  mkdir -p "$STATE_DIR" "$MODELS_DIR/llama.cpp"
+  write_services
+  write_agent "$label" "$py" "$repo/app.py" "$STATE_DIR/switcher.log" \
+    "API_KEY=$API_KEY" "SERVICES_FILE=$STATE_DIR/services.json" "STATE_FILE=$STATE_DIR/active" \
+    "LISTEN=127.0.0.1" "PORT=$PORT" "IDLE_MINUTES=$IDLE_MINUTES" "NAME=$NAME" "MODELS_DIR=$MODELS_DIR" \
+    "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  if [[ -n ${STUDIO_DIR:-} ]]; then
+    [[ -f $STUDIO_DIR/app.py ]] || die "STUDIO_DIR=$STUDIO_DIR isn't a Studio checkout"
+    [[ -n ${COMFYUI_DIR:-} ]] || die "STUDIO_DIR needs COMFYUI_DIR"
+    mkdir -p "$STATE_DIR/studio" "$MEDIA_DIR/studio"
+    node_packs "$COMFYUI_DIR/custom_nodes" <"$STUDIO_DIR/comfy-nodes.txt"
+    "$py" "$STUDIO_DIR/guide.py" "$STATE_DIR/studio" || true
+    write_agent "$label.studio" "$py" "$STUDIO_DIR/app.py" "$STATE_DIR/studio.log" \
+      "API_KEY=$API_KEY" "SWITCHER=http://127.0.0.1:$PORT" "COMFY_URL=http://127.0.0.1:${COMFYUI_PORT:-8188}" \
+      "COMFY_DIR=$COMFYUI_DIR" "MODELS=$COMFYUI_DIR/models" "DATA=$STATE_DIR/studio" "MEDIA=$MEDIA_DIR/studio" \
+      "STUDIO_LLM=$CHAT_NAME" "LISTEN=127.0.0.1" "PORT=$STUDIO_PORT"
+  else
+    stop_agent "$label.studio"
+    rm -f "$(plist "$label.studio")"
+  fi
+}
+
+mac_down() {
+  local name
+  for name in "$label.studio" "$label"; do
+    stop_agent "$name"
+    rm -f "$(plist "$name")"   # or it starts again at the next login
+  done
+}
+
+# --- Commands ------------------------------------------------------------------------------
+
+case ${1:-} in
+  up)
+    [[ -f $conf ]] || { write_config; exit 0; }
+    load_config
+    if [[ $os == Darwin ]]; then mac_up; else linux_up; fi
+    for _ in $(seq 30); do api /_ai/api/status >/dev/null 2>&1 && break; sleep 1; done
+    api /_ai/api/status >/dev/null || die "the switcher doesn't answer; see the log in $STATE_DIR"
+    echo "Running: http://127.0.0.1:$PORT (page; login with local-ai key), http://127.0.0.1:$PORT/v1 (API)"
+    if [[ ${STUDIO:-} == yes || -n ${STUDIO_DIR:-} ]]; then echo "Studio: http://127.0.0.1:$STUDIO_PORT"; fi
+    ;;
+  down)
+    load_config
+    if [[ $os == Darwin ]]; then mac_down; else linux_down; fi
+    ;;
+  status)
+    load_config
+    status=$(api /_ai/api/status 2>/dev/null) || die "the switcher doesn't answer on port $PORT"
+    python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for s in d["services"]:
+    print("%-10s %-8s %-8s %s" % (s["id"], s["state"], s.get("health") or "", s["title"]))
+if d.get("switching"): print("switching to", d["switching"])
+if d.get("error"): print("error:", d["error"])' <<<"$status"
+    ;;
+  key)
+    load_config
+    echo "$API_KEY"
+    ;;
+  *)
+    sed -n '2,10s/^# \{0,1\}//p' "$0"
+    exit 1
+    ;;
+esac

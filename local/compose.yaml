@@ -1,0 +1,130 @@
+# gpu-switcher on your own Linux computer with an NVIDIA GPU: the switcher, a chat model
+# (llama.cpp), ComfyUI and the Studio, all on 127.0.0.1. `local-ai up` writes the settings
+# (~/.config/gpu-switcher/local.env) and runs this; see local/README.md.
+# Images are pinned by digest; ComfyUI is built here from a pinned release.
+name: gpu-switcher
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: cdi
+            device_ids: [nvidia.com/gpu=all]
+            capabilities: [gpu]
+
+services:
+  switcher:
+    image: ghcr.io/sjespersen/gpu-switcher:latest@sha256:b2e751e43a4695f2c8aa8d20c024fc24f2e7a893bdd56739b1da91c5423f974b  # 0.1.0
+    user: "${UID}:${GID}"
+    environment:
+      API_KEY: ${API_KEY}
+      DOCKER_PROXY: socket-proxy:2375
+      PROJECT: gpu-switcher   # only this stack's containers
+      IDLE_MINUTES: ${IDLE_MINUTES}
+      NAME: ${NAME}
+      MODELS_DIR: /models
+    ports:
+      - "127.0.0.1:${PORT}:8079"
+    volumes:
+      - ${STATE_DIR}:/state
+      - ${MODELS_DIR}:/models:ro
+    networks: [default, docker-api]
+    read_only: true
+    cap_drop: [ALL]
+    <<: *gpu   # only for nvidia-smi, the page's GPU gauge
+    restart: unless-stopped
+
+  # Started and stopped by the switcher, never by compose (the profile keeps `up` away from it).
+  chat:
+    profiles: [chat]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:31b39eacce2bab5fde9286ec3980ed5548a3987644e94da0d0c2092f93313538  # b11749
+    user: "${UID}:${GID}"
+    labels:
+      homelab.ai.title: ${CHAT_TITLE}
+      homelab.ai.about: "Chat on llama.cpp"
+      homelab.ai.kind: chat
+      homelab.ai.order: "1"
+      homelab.ai.model: ${CHAT_NAME}
+      homelab.ai.files: llama.cpp
+    environment:
+      LLAMA_CACHE: /models   # -hf downloads land here
+      HOME: /models
+    command: ["--hf-repo", "${CHAT_REPO}", "--hf-file", "${CHAT_FILE}", "--alias", "${CHAT_NAME}",
+              "--jinja", "--ctx-size", "${CHAT_CONTEXT}", "--n-gpu-layers", "99", "--flash-attn", "on",
+              "--host", "0.0.0.0", "--port", "8080"]
+    volumes:
+      - ${MODELS_DIR}/llama.cpp:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]
+      interval: 15s
+      start_period: 30m   # the first start downloads the model
+    <<: *gpu
+
+  comfyui:
+    profiles: [comfyui]
+    build: ./comfyui
+    image: local/comfyui:v0.42.1
+    user: "${UID}:${GID}"
+    labels:
+      homelab.ai.title: ComfyUI
+      homelab.ai.about: "Images and video"
+      homelab.ai.kind: image
+      homelab.ai.order: "2"
+      homelab.ai.port: "8188"
+      homelab.ai.files: comfyui
+    ports:
+      - "127.0.0.1:8188:8188"   # its own page, while it has the GPU
+    volumes:
+      - ${MODELS_DIR}/comfyui:/opt/ComfyUI/models
+      - ${STATE_DIR}/comfyui/custom_nodes:/opt/ComfyUI/custom_nodes
+      - ${STATE_DIR}/comfyui/user:/opt/ComfyUI/user
+      - ${MEDIA_DIR}/comfyui/input:/opt/ComfyUI/input
+      - ${MEDIA_DIR}/comfyui/output:/opt/ComfyUI/output
+    tmpfs: [/opt/ComfyUI/temp]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats', timeout=5)"]
+      interval: 15s
+      start_period: 5m
+    <<: *gpu
+
+  studio:
+    profiles: [studio]
+    image: ghcr.io/sjespersen/studio:latest@sha256:0fe375e43554f0b26ca311d6b5e163851485213c7ec8c1d3a737d9306b1a9960  # 0.1.0
+    user: "${UID}:${GID}"
+    environment:
+      API_KEY: ${API_KEY}
+      SWITCHER: http://switcher:8079
+      COMFY_URL: http://comfyui:8188
+      STUDIO_LLM: ${CHAT_NAME}
+      TZ: ${TZ}
+    ports:
+      - "127.0.0.1:${STUDIO_PORT}:8078"
+    volumes:
+      - ${STATE_DIR}/studio:/data
+      - ${MEDIA_DIR}/studio:/media
+      - ${MODELS_DIR}/comfyui:/models:ro
+      - ${MEDIA_DIR}/comfyui/input:/comfy/ComfyUI/input
+      - ${MEDIA_DIR}/comfyui/output:/comfy/ComfyUI/output
+    read_only: true
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  # The switcher's only way to Docker: list, start and stop containers, nothing else.
+  socket-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest@sha256:e5d819de59b343c01b2fe7adc7fad3c7a60e5dba08e45f1ac317352bc08599b5  # 3.4.7-r0-ls103
+    environment:
+      CONTAINERS: "1"
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    read_only: true
+    tmpfs: [/run]
+    restart: unless-stopped
+
+networks:
+  docker-api:
+    internal: true

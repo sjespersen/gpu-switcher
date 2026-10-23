@@ -31,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 API_KEY = os.environ["API_KEY"]
 DOCKER = os.environ.get("DOCKER_PROXY", "socket-proxy:2375")
+# Only this compose project's containers (its name), when other stacks on the host have labels too.
+PROJECT = os.environ.get("PROJECT", "")
 # The services as commands to run, in place of Docker containers (see process_services).
 SERVICES_FILE = os.environ.get("SERVICES_FILE", "")
 STATE = os.environ.get("STATE_FILE", "/state/active")
@@ -126,7 +128,8 @@ def stop_service(s):
 
 
 def docker_services():
-    flt = urllib.parse.quote(json.dumps({"label": ["homelab.ai.title"]}))
+    labels = ["homelab.ai.title"] + ([f"com.docker.compose.project={PROJECT}"] if PROJECT else [])
+    flt = urllib.parse.quote(json.dumps({"label": labels}))
     found = []
     for c in docker("GET", f"/containers/json?all=1&filters={flt}"):
         labels = c["Labels"]
@@ -216,6 +219,9 @@ def answers(host, port, path):
 
 def process_start(s):
     e = s["_entry"]
+    # Something else on its port would pass for it once it "answers".
+    if answers(s["host"], s["port"], None) == "healthy":
+        raise RuntimeError(f"{s['title']}: port {s['port']} is in use by something else")
     log = open(os.path.join(os.path.dirname(STATE), f"{s['id']}.log"), "ab")
     procs[s["id"]] = subprocess.Popen(
         [os.path.expanduser(a) for a in e["command"]], cwd=os.path.expanduser(e.get("cwd") or "~"),
