@@ -7,7 +7,7 @@
     <div><h1 id="name">Local AI</h1><div class="sub" id="holder">Loading…</div></div></div>
   <div class="top-right"><span class="state" id="power-state"></span>
     <span class="live" id="live" title="The page asks the box every 3 seconds"><i></i><span>live</span></span>
-    <div class="power" title="The model stops before suspend and starts again after waking. Wake with ./ai-model.sh wake or the power button.">
+    <div class="power" title="The model stops before suspend and starts again after waking. Wake it with Wake-on-LAN or its power button.">
       <button data-power="suspend" data-label="Suspend" data-icon="moon" aria-label="Suspend"><span>Suspend</span></button>
       <button data-power="reboot" data-label="Restart" data-icon="restart" aria-label="Restart"><span>Restart</span></button>
       <button data-power="poweroff" data-label="Shut down" data-icon="power" aria-label="Shut down"><span>Shut down</span></button></div>
@@ -30,7 +30,7 @@
           <button class="small" id="copy-api">Copy</button></div></dd>
         <dt>Key</dt><dd>The API key, as <code>Authorization: Bearer &lt;key&gt;</code> or <code>x-api-key</code></dd>
         <dt>Models</dt><dd><span class="chips" id="api-models" style="display:inline-flex;margin:0"></span>
-          <div class="state">OpenAI-compatible; Strata also speaks Anthropic's <code>/v1/messages</code>.</div></dd>
+          <div class="state">OpenAI-compatible; also Anthropic's <code>/v1/messages</code> where the model's server speaks it.</div></dd>
         <dt>Idle</dt><dd class="state" id="idle"></dd>
       </dl>
     </section>
@@ -76,7 +76,7 @@ const SERVICE_LOOK = {
 };
 const icon = n => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`;
 let LINKS = [];
-// The services' links (install.sh writes them; {{.Host}} is the address this page was opened at).
+// The services' links (LINKS_FILE, e.g. homelab-agent's install.sh writes them; {{.Host}} is the address this page was opened at).
 function siteLink(module, site) {
   const l = LINKS.find(x => x.module === module && x.site === site);
   return l ? l.url : '';
@@ -299,7 +299,7 @@ function vitals(d) {
       `<div class="bar">${bar}</div><div class="legend">${legend}</div>${spark(H.power, peak)}`,
       `GPU and CPU measured; ~${d.rest_watts} W for board, RAM, disks, fans`, 'wide big');
   } else {
-    power = metric('Whole box', '–', '', c.power == null ? 'CPU power not measured: rerun setup.sh' : 'the GPU reports no power', 'wide');
+    power = metric('Whole box', '–', '', c.power == null ? 'CPU power not measured' : 'the GPU reports no power', 'wide');
   }
   out.push(section('bolt', 'Power', 'estimate', power));
   return out.join('');

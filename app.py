@@ -1,8 +1,8 @@
-"""Local AI switcher: shows which GPU service runs and switches between them.
+"""gpu-switcher: shows which GPU service runs and switches between them.
 
 Only one service can have the GPU, so switching stops the others first. Talks to Docker
 through a proxy that allows listing, starting and stopping containers and nothing else.
-The services are the containers labelled homelab.ai.title (see compose.yaml). Login is the
+The services are the containers labelled homelab.ai.title (see the README). Login is the
 AI API key; Caddy also asks /_ai/auth before letting anyone into SwarmUI.
 
 Without Docker (SERVICES_FILE set, e.g. on a Mac), the services are commands listed in that
@@ -38,14 +38,14 @@ STATE = os.environ.get("STATE_FILE", "/state/active")
 LISTEN = os.environ.get("LISTEN", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8079"))
 # The LED switch (AI_LEDS=yes): this only writes "on"/"off"; a root service on the host applies
-# it with OpenRGB and writes leds.status (stacks/ai/host/homelab-leds.sh).
+# it with OpenRGB and writes leds.status (homelab-agent's stacks/ai/host/homelab-leds.sh).
 LEDS = os.environ.get("LEDS") == "yes"
 LEDS_FILE = os.path.join(os.path.dirname(STATE), "leds")
 LEDS_STATUS = LEDS_FILE + ".status"
 # White unless a color is picked: "on" with a color effect (Static, Breathing ...) and no color
 # would keep the board's last one, which after "off" is black.
 # Suspend, restart, shut down: also only written to a file, for a root service on the host
-# (stacks/ai/host/homelab-power.sh), which accepts nothing but these three words. Only with
+# (homelab-agent's stacks/ai/host/homelab-power.sh), which accepts nothing but these three words. Only with
 # POWER=yes: without that service nothing would act on them.
 POWER = os.environ.get("POWER") == "yes"
 POWER_FILE = os.path.join(os.path.dirname(STATE), "power")
@@ -664,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
         return None if length > MAX_BODY else self.rfile.read(length)
 
     def api_error(self, code, message):
-        self.json({"error": {"message": message, "type": "homelab_switcher"}}, code)
+        self.json({"error": {"message": message, "type": "gpu_switcher"}}, code)
 
     def chat_api(self):
         """/v1: answers /v1/models itself, sends everything else to the chat model the request
@@ -678,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path.rstrip("/")
         if self.command == "GET" and path == "/v1/models":
             return self.json({"object": "list", "data": [
-                {"id": s["models"][0], "object": "model", "owned_by": "homelab", "service": s["id"],
+                {"id": s["models"][0], "object": "model", "owned_by": "gpu-switcher", "service": s["id"],
                  "loaded": s["state"] == "running"} for s in all_services if s["models"]]})
         body = self.read_body() if self.command in ("POST", "PUT", "PATCH") else b""
         if body is None:

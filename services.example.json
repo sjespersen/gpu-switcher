@@ -1,0 +1,9 @@
+{"services": [
+  {"id": "qwen", "title": "Qwen3.8-27B", "about": "Chat on llama.cpp", "kind": "chat",
+   "models": ["qwen3.8-27b"], "port": 8080, "health": "/health",
+   "command": ["llama-server", "-m", "~/ai-models/Qwen3.8-27B-UD-Q3_K_XL.gguf",
+               "--host", "127.0.0.1", "--port", "8080", "-ngl", "99", "-c", "32768", "--jinja"]},
+  {"id": "comfyui", "title": "ComfyUI", "about": "Images and video", "kind": "image",
+   "port": 8188, "health": "/system_stats", "cwd": "~/ComfyUI",
+   "command": ["~/ComfyUI/.venv/bin/python", "main.py", "--listen", "127.0.0.1", "--port", "8188"]}
+]}
