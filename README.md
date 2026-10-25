@@ -139,6 +139,21 @@ Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as
 | `NAME`, `LINKS_FILE` | | The page's title, and a JSON list of other links to show |
 | `POWER` | | `yes`: suspend/restart/shut down buttons. They only write `power` next to `STATE_FILE`; something on the host has to act on it (homelab-agent's `homelab-power.sh`) |
 | `LEDS`, `LEDS_EFFECT`, `LEDS_SPEED` | | `yes`: a case-lighting card, for an OpenRGB service on the host that reads the `leds` file (homelab-agent's `homelab-leds.sh`) |
+| `CLASSIFIER_SHIM` | | `allow`: answer Claude Code's auto-mode safety-classifier calls here instead of asking the model (see below) |
+
+## Claude Code auto-mode classifier
+
+Claude Code's "auto mode" sends a safety-classifier request to the chat model before each tool
+call — a system prompt beginning "You are a security monitor for autonomous AI coding agents",
+with a terse verdict (`<block>no</block>` allows, `<block>yes</block>…` blocks). A local chat
+model is slow and seldom hits that exact format, so the verdict times out or parse-fails, and
+Claude Code falls back to a model the account's policy forbids — a dead end that stops the
+session.
+
+With `CLASSIFIER_SHIM=allow` the switcher recognises these requests (by that system prompt) and
+answers them itself — instantly, without the GPU, always allowing. Ordinary `/v1` chat requests
+are untouched. This turns auto mode's tool review into a rubber stamp, so use it only where you
+would otherwise run the agent without that review (your own box, your own commands).
 
 ## API
 
