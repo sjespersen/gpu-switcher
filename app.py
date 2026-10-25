@@ -748,13 +748,28 @@ def text_of(content):
     return ""
 
 
+def last_part(content):
+    """A user message's last text part (clients like Claude Code put reminders before the
+    question), or what its last tool result says."""
+    if not isinstance(content, list):
+        return text_of(content)
+    for p in reversed(content):
+        if isinstance(p, str) and p.strip():
+            return p
+        if isinstance(p, dict) and p.get("type") == "tool_result":
+            return "tool result: " + text_of(p.get("content"))
+        if isinstance(p, dict) and str(p.get("text") or "").strip():
+            return p["text"]
+    return ""
+
+
 def prompt_of(req):
     """What a request asks: its last user message, or its prompt or input."""
     if not isinstance(req, dict):
         return ""
     for m in reversed(req.get("messages") or []):
         if isinstance(m, dict) and m.get("role") == "user":
-            return text_of(m.get("content"))
+            return last_part(m.get("content"))
     for k in ("prompt", "input"):
         if req.get(k):
             v = req[k]
