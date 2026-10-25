@@ -18,10 +18,13 @@ import hashlib
 import hmac
 import http.client
 import json
+import logging
+import logging.handlers
 import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -80,6 +83,12 @@ IDLE_MINUTES = float(os.environ.get("IDLE_MINUTES") or 0)
 # A first start downloads the model: wait that long for it before giving up on a request.
 START_TIMEOUT = 60 * 60
 MAX_BODY = 200 * 1024 * 1024
+# The API log (API_LOG_DIR set): every request that runs a model and what came back, one JSON
+# object per line in API_LOG_DIR/api.jsonl, rotated at 10 MB with 5 old files kept. Pictures
+# and embeddings are left out (their size instead); a streamed answer is put back together.
+API_LOG_DIR = os.environ.get("API_LOG_DIR", "")
+API_LOG_PATHS = OLLAMA_GPU_PATHS | {"/v1/messages"}
+MAX_LOGGED = 12 * 1024 * 1024   # of one answer, and of one line (VictoriaLogs takes 16 MB)
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
                "trailer", "transfer-encoding", "upgrade", "host", "content-length"}
 
@@ -641,6 +650,183 @@ def idle_watch():
                     api.notify_all()
 
 
+# --- The API log ---------------------------------------------------------------------------
+
+_api_log = logging.getLogger("switcher.api")
+_api_log.propagate = False
+_client_names = {}
+
+
+def without_pictures(v):
+    """A copy with base64 data (long strings without spaces) and embeddings (long lists of
+    numbers) replaced by their size."""
+    if isinstance(v, dict):
+        return {k: without_pictures(x) for k, x in v.items()}
+    if isinstance(v, list):
+        if len(v) > 64 and all(isinstance(x, (int, float)) for x in v):
+            return f"<{len(v)} numbers>"
+        return [without_pictures(x) for x in v]
+    if isinstance(v, str) and len(v) > 4096 and not any(c.isspace() for c in v[:4096]):
+        return f"<{len(v) * 3 // 4 // 1024} KB of data>"
+    return v
+
+
+def assembled(raw):
+    """A streamed answer (OpenAI's or Anthropic's server-sent events, Ollama's JSON lines) as
+    one: its text, reasoning, tool calls, why it stopped and the token counts."""
+    out = {"text": "", "reasoning": "", "tool_calls": [], "finish": None, "usage": {}}
+    tools = out["tool_calls"]
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip().removeprefix("data:").strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        for c in e.get("choices") or []:   # OpenAI
+            d = c.get("delta") or {}
+            out["text"] += d.get("content") or c.get("text") or ""
+            out["reasoning"] += d.get("reasoning_content") or d.get("reasoning") or ""
+            for t in d.get("tool_calls") or []:
+                i = t.get("index", len(tools))
+                while len(tools) <= i:
+                    tools.append({"name": "", "arguments": ""})
+                f = t.get("function") or {}
+                tools[i]["name"] += f.get("name") or ""
+                tools[i]["arguments"] += f.get("arguments") or ""
+            out["finish"] = c.get("finish_reason") or out["finish"]
+        kind, d = e.get("type"), e.get("delta") or {}   # Anthropic
+        if kind == "content_block_start" and (e.get("content_block") or {}).get("type") == "tool_use":
+            tools.append({"name": e["content_block"].get("name") or "", "arguments": ""})
+        elif kind == "content_block_delta":
+            out["text"] += d.get("text") or ""
+            out["reasoning"] += d.get("thinking") or ""
+            if d.get("partial_json") and tools:
+                tools[-1]["arguments"] += d["partial_json"]
+        elif kind == "message_delta":
+            out["finish"] = d.get("stop_reason") or out["finish"]
+        m = e.get("message")
+        if isinstance(m, dict):
+            if isinstance(m.get("content"), str):   # Ollama's /api/chat
+                out["text"] += m["content"]
+                out["reasoning"] += m.get("thinking") or ""
+                tools += [{"name": (t.get("function") or {}).get("name", ""),
+                           "arguments": json.dumps((t.get("function") or {}).get("arguments"))}
+                          for t in m.get("tool_calls") or []]
+            out["usage"].update(m.get("usage") or {})   # Anthropic's message_start
+        if isinstance(e.get("response"), str):   # Ollama's /api/generate
+            out["text"] += e["response"]
+            out["reasoning"] += e.get("thinking") or ""
+        if e.get("done"):
+            out["finish"] = e.get("done_reason") or out["finish"]
+            out["usage"].update({k: e[k] for k in ("prompt_eval_count", "eval_count") if k in e})
+        if isinstance(e.get("usage"), dict):
+            out["usage"].update(e["usage"])
+    return {k: v for k, v in out.items() if v}
+
+
+def tokens(response):
+    """The answer's token counts as "in → out", or ""."""
+    if not isinstance(response, dict):
+        return ""
+    u = response.get("usage") if isinstance(response.get("usage"), dict) else response
+    n_in = u.get("prompt_tokens", u.get("input_tokens", u.get("prompt_eval_count")))
+    n_out = u.get("completion_tokens", u.get("output_tokens", u.get("eval_count")))
+    return f"{n_in} → {n_out} tokens" if n_in is not None or n_out is not None else ""
+
+
+def text_of(content):
+    """The text in a message's content (a string, or a list of parts)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p if isinstance(p, str) else str(p.get("text") or "")
+                        for p in content if isinstance(p, (str, dict)))
+    return ""
+
+
+def prompt_of(req):
+    """What a request asks: its last user message, or its prompt or input."""
+    if not isinstance(req, dict):
+        return ""
+    for m in reversed(req.get("messages") or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            return text_of(m.get("content"))
+    for k in ("prompt", "input"):
+        if req.get(k):
+            v = req[k]
+            return text_of(v) if not isinstance(v, list) or not v or not isinstance(v[0], dict) \
+                else text_of((v[-1] or {}).get("content"))
+    return ""
+
+
+def answer_of(response):
+    """The answer's text: an assembled stream's, or OpenAI's, Anthropic's or Ollama's whole answer."""
+    if not isinstance(response, dict):
+        return ""
+    if "text" in response or "tool_calls" in response:   # assembled from a stream
+        calls = " ".join(f"{t['name']}({t['arguments']})" for t in response.get("tool_calls", []))
+        return " ".join(x for x in (response.get("text", ""), calls) if x)
+    for c in response.get("choices") or []:
+        return text_of((c.get("message") or {}).get("content")) or c.get("text") or ""
+    if isinstance(response.get("content"), list):
+        return text_of(response["content"])
+    return text_of((response.get("message") or {}).get("content")) or response.get("response") or ""
+
+
+def short(text, n=120):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def client_name(ip):
+    """A container's name for its address in the compose network (Docker's DNS answers that),
+    else the address."""
+    if ip not in _client_names:
+        try:
+            name = socket.gethostbyaddr(ip)[0].split(".")[0] if not ip.startswith("127.") else ip
+        except OSError:
+            name = ip
+        _client_names[ip] = name
+    return _client_names[ip]
+
+
+def api_log(entry, status, response=None, error=None):
+    """Appends one entry to the API log; a log that can't be written never stops a request."""
+    if entry is None:
+        return
+    try:
+        if not _api_log.handlers:
+            os.makedirs(API_LOG_DIR, exist_ok=True)
+            h = logging.handlers.RotatingFileHandler(os.path.join(API_LOG_DIR, "api.jsonl"),
+                                                     maxBytes=10 * 2**20, backupCount=5, encoding="utf-8")
+            h.setFormatter(logging.Formatter("%(message)s"))
+            _api_log.addHandler(h)
+            _api_log.setLevel(logging.INFO)
+        req = entry["request"]
+        seconds = round(time.time() - entry.pop("start"), 1)
+        model = req.get("model") if isinstance(req, dict) else None
+        client = entry["client"] if entry.pop("forwarded") else client_name(entry["client"])
+        summary = " · ".join(x for x in (
+            str(model or "?"), client, f"{seconds} s", str(status) if status != 200 else "",
+            tokens(response), f"ERROR {error}" if error else "",
+            f"Q: {short(prompt_of(req))}" if prompt_of(req) else "",
+            f"A: {short(answer_of(response))}" if answer_of(response) else "") if x)
+        line = {"at": datetime.now(timezone.utc).isoformat(), **entry, "client": client, "model": model,
+                "status": status, "seconds": seconds, "error": error, "summary": summary,
+                "request": without_pictures(req), "response": without_pictures(response)}
+        text = json.dumps(line, ensure_ascii=False, default=str)
+        if len(text) > MAX_LOGGED:
+            line["request"] = f"<{len(text) // 1024} KB, too large for the log>"
+            text = json.dumps(line, ensure_ascii=False, default=str)
+        _api_log.info(text)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -678,6 +864,19 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         return None if length > MAX_BODY else self.rfile.read(length)
 
+    def api_log_entry(self, path, body):
+        """The start of an API log entry, for a request that runs a model (else None)."""
+        if not API_LOG_DIR or self.command != "POST" or path.rstrip("/") not in API_LOG_PATHS:
+            return None
+        try:
+            req = json.loads(body)
+        except ValueError:
+            req = body[:MAX_LOGGED].decode("utf-8", "replace")
+        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        return {"start": time.time(), "path": urllib.parse.urlsplit(self.path).path,
+                "client": forwarded or self.client_address[0], "forwarded": bool(forwarded),
+                "agent": self.headers.get("User-Agent", ""), "request": req}
+
     def api_error(self, code, message):
         self.json({"error": {"message": message, "type": "gpu_switcher"}}, code)
 
@@ -708,18 +907,20 @@ class Handler(BaseHTTPRequestHandler):
         target = chat_target(model, all_services)
         if target is None:
             return self.api_error(503, "no chat model in this stack")
+        entry = self.api_log_entry(path, body)
         with api:
             activity["waiting"] += 1
             activity["last"] = time.time()
         try:
             error = ensure_running(target["id"])
             if error:
+                api_log(entry, 503, error=error)
                 return self.api_error(503, error)
             activity["chat"] = target["id"]
             with api:
                 inflight[target["id"]] = inflight.get(target["id"], 0) + 1
             try:
-                self.proxy(target["host"], target["port"], self.path, body)
+                self.proxy(target["host"], target["port"], self.path, body, entry)
             finally:
                 with api:
                     inflight[target["id"]] -= 1
@@ -753,28 +954,36 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if not runs_model:
             return self.proxy(OLLAMA_HOST, OLLAMA_PORT, path, body)
+        entry = self.api_log_entry(urllib.parse.urlsplit(path).path, body)
         error = ensure_ollama()
         if error:
+            api_log(entry, 503, error=error)
             return self.json({"error": error}, 503)
         with api:
             inflight["ollama"] = inflight.get("ollama", 0) + 1
         try:
-            self.proxy(OLLAMA_HOST, OLLAMA_PORT, path, body)
+            self.proxy(OLLAMA_HOST, OLLAMA_PORT, path, body, entry)
         finally:
             with api:
                 inflight["ollama"] -= 1
                 api.notify_all()
 
-    def proxy(self, host, port, path, body):
-        """Passes the request on and streams the answer back as it comes (server-sent events)."""
+    def proxy(self, host, port, path, body, log=None):
+        """Passes the request on and streams the answer back as it comes (server-sent events).
+        With log (an API log entry), keeps a copy of the answer and writes the entry at the end."""
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
+        if log is not None:
+            headers.pop("Accept-Encoding", None)   # the copy for the log stays readable
+            headers.pop("accept-encoding", None)
         conn = http.client.HTTPConnection(host, port, timeout=3600)
         try:
             conn.request(self.command, path, body=body or None, headers=headers)
             resp = conn.getresponse()
         except OSError as e:
             conn.close()
+            api_log(log, 502, error=f"{host}: {e}")
             return self.api_error(502, f"{host}: {e}")
+        kept, size, error = [], 0, None
         try:
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
@@ -784,12 +993,29 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
             while chunk := resp.read1(65536):
+                if log is not None and size < MAX_LOGGED:
+                    kept.append(chunk)
+                    size += len(chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except OSError:
-            pass  # the client went away; closing the upstream connection ends the generation
+            # the client went away; closing the upstream connection ends the generation
+            error = "the client went away"
         finally:
             conn.close()
+            if log is not None:
+                raw = b"".join(kept)
+                ctype = resp.getheader("Content-Type", "")
+                if "event-stream" in ctype or "ndjson" in ctype:
+                    answer = assembled(raw)
+                else:
+                    try:
+                        answer = json.loads(raw)
+                    except ValueError:
+                        answer = raw.decode("utf-8", "replace")
+                if resp.status >= 400 and not error:
+                    error = short(answer_of(answer) or (answer.get("error") if isinstance(answer, dict) else answer), 200)
+                api_log(log, resp.status, answer, error)
 
     def send(self, code, body=b"", ctype="text/plain; charset=utf-8", headers=()):
         if isinstance(body, str):

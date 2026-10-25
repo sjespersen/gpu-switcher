@@ -135,6 +135,7 @@ Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as
 | `SERVICES_FILE` | | The services as commands (without Docker) |
 | `OLLAMA_URL` | `http://ollama:11434` | Where Ollama answers, if there is one |
 | `MODELS_DIR`, `MEDIA_DIR` | `/models`, `/media` | Disks shown on the page; models dropped from the page cache |
+| `API_LOG_DIR` | | Log every request that runs a model and its answer to `api.jsonl` here (one JSON object per line, rotated at 10 MB, 5 old files kept). Streamed answers are put back together; pictures and embeddings are left out |
 | `NAME`, `LINKS_FILE` | | The page's title, and a JSON list of other links to show |
 | `POWER` | | `yes`: suspend/restart/shut down buttons. They only write `power` next to `STATE_FILE`; something on the host has to act on it (homelab-agent's `homelab-power.sh`) |
 | `LEDS`, `LEDS_EFFECT`, `LEDS_SPEED` | | `yes`: a case-lighting card, for an OpenRGB service on the host that reads the `leds` file (homelab-agent's `homelab-leds.sh`) |
@@ -160,6 +161,8 @@ Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as
   creating containers, running commands in them or reading their files.
 - Listen on `127.0.0.1` unless something in front of it (Caddy, Tailscale) needs more.
 - The power buttons are off unless `POWER=yes`, and even then only write a word to a file.
+- `API_LOG_DIR` keeps the prompts and answers of every API request (also Open WebUI's chats
+  through `/ollama`) in plain text: keep that folder private, and off by default.
 
 ## License
 
