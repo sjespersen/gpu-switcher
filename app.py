@@ -160,6 +160,8 @@ def docker_services():
             "about": labels.get("homelab.ai.about", ""),
             "kind": labels.get("homelab.ai.kind", "chat"),
             "site": labels.get("homelab.ai.site", ""),
+            # A web UI of its own on this port: the page links it at /_ai/ui/<id>/, behind the login.
+            "ui": int(labels.get("homelab.ai.ui") or 0),
             # The names API requests use for it (the first is the one /v1/models lists).
             "models": [m.strip().lower() for m in labels.get("homelab.ai.model", "").split(",") if m.strip()],
             "order": int(labels.get("homelab.ai.order", "9")),
@@ -206,6 +208,7 @@ def process_services():
             "about": e.get("about", ""),
             "kind": e.get("kind", "chat"),
             "site": e.get("site", ""),
+            "ui": int(e.get("ui") or 0),
             "models": [m.strip().lower() for m in e.get("models", []) if m.strip()],
             "order": int(e.get("order", i + 1)),
             "always_on": bool(e.get("always_on")),
@@ -1075,6 +1078,64 @@ class Handler(BaseHTTPRequestHandler):
                     error = short(answer_of(answer) or (answer.get("error") if isinstance(answer, dict) else answer), 200)
                 api_log(log, resp.status, answer, error)
 
+    def service_ui(self):
+        """/_ai/ui/<id>/...: a service's own web UI (homelab.ai.ui), behind the page's login.
+        Passed through as raw bytes, so WebSockets work too."""
+        if not self.authed():
+            return self.send(302, headers=[("Location", "/_ai/login?next=" + urllib.parse.quote(self.path))])
+        url = urllib.parse.urlsplit(self.path)
+        sid, slash, rest = url.path[len("/_ai/ui/"):].partition("/")
+        if not slash:
+            return self.send(302, headers=[("Location", f"/_ai/ui/{sid}/")])
+        s = next((x for x in services() if x["id"] == sid and x["ui"]), None)
+        if s is None:
+            return self.send(404, "not found")
+        if s["state"] != "running":
+            return self.send(502, f"{s['title']} isn't running. Switch to it on the Local AI page.")
+        path = "/" + rest + ("?" + url.query if url.query else "")
+        try:
+            up = socket.create_connection((s["host"], s["ui"]), timeout=10)
+        except OSError as e:
+            return self.send(502, f"{s['title']} doesn't answer yet ({e}). Try again in a moment.")
+        up.settimeout(None)
+        websocket = self.headers.get("Upgrade", "").lower() == "websocket"
+        lines = [f"{self.command} {path} HTTP/1.1"]
+        for k, v in self.headers.items():
+            # The page's login stays here; a plain request gets one answer, then both sides close.
+            if k.lower() in ("cookie", "authorization") or (not websocket and k.lower() in ("connection", "keep-alive")):
+                continue
+            lines.append(f"{k}: {v}")
+        lines.append(f"X-Forwarded-Prefix: /_ai/ui/{sid}")
+        if not websocket:
+            lines.append("Connection: close")
+        self.close_connection = True
+        try:
+            up.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            if websocket:
+                def upstream():
+                    try:
+                        while chunk := self.rfile.read1(65536):
+                            up.sendall(chunk)
+                    except OSError:
+                        pass
+                    finally:
+                        try:
+                            up.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                threading.Thread(target=upstream, daemon=True).start()
+            else:
+                left = int(self.headers.get("Content-Length") or 0)
+                while left > 0 and (chunk := self.rfile.read(min(left, 65536))):
+                    up.sendall(chunk)
+                    left -= len(chunk)
+            while chunk := up.recv(65536):
+                self.wfile.write(chunk)
+        except OSError:
+            pass  # either side went away
+        finally:
+            up.close()
+
     def send(self, code, body=b"", ctype="text/plain; charset=utf-8", headers=()):
         if isinstance(body, str):
             body = body.encode()
@@ -1096,6 +1157,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.ollama_api()
         if url.path == "/v1" or url.path.startswith("/v1/"):
             return self.chat_api()
+        if url.path.startswith("/_ai/ui/"):
+            return self.service_ui()
         if url.path == "/_ai/auth":
             # Caddy's forward_auth for SwarmUI: 2xx lets the request through.
             if self.authed():
@@ -1153,6 +1216,8 @@ class Handler(BaseHTTPRequestHandler):
         # Ollama's DELETE /api/delete (Open WebUI removing a model).
         if urllib.parse.urlsplit(self.path).path.startswith("/ollama/"):
             return self.ollama_api()
+        if urllib.parse.urlsplit(self.path).path.startswith("/_ai/ui/"):
+            return self.service_ui()
         self.send(404, "not found")
 
     def do_OPTIONS(self):
@@ -1167,6 +1232,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.ollama_api()
         if url.path == "/v1" or url.path.startswith("/v1/"):
             return self.chat_api()
+        if url.path.startswith("/_ai/ui/"):
+            return self.service_ui()
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(min(length, 10000)).decode()
         if url.path == "/_ai/login":

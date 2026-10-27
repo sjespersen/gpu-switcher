@@ -92,6 +92,7 @@ The labels:
 | `homelab.ai.port` | Its API port in the compose network (default 8080) |
 | `homelab.ai.order` | Position on the page |
 | `homelab.ai.site` | A link for its Open button (a key in `LINKS_FILE`) |
+| `homelab.ai.ui` | The port of its own web UI in the compose network: its Open button goes to `/_ai/ui/<id>/`, which the switcher passes through (WebSockets too) behind its login; the UI sees the prefix in `X-Forwarded-Prefix` and should use relative links |
 | `homelab.ai.files` | Its model folder under `MODELS_DIR`, dropped from the page cache when another service starts |
 | `homelab.ai.always-on` | `true` for Ollama (see above) |
 | `homelab.ai.variant-of` | Another service's id: another model on the same engine (e.g. a fine-tune). No card of its own on the page; API requests naming its model start it |
@@ -112,7 +113,7 @@ API_KEY=$(openssl rand -hex 24) SERVICES_FILE=services.json STATE_FILE=~/.local/
 ```
 
 Each entry has the label settings as keys (`title`, `about`, `kind`, `models` as a list,
-`order`, `site`, `files`, `always_on`, `variant_of`), and also:
+`order`, `site`, `ui`, `files`, `always_on`, `variant_of`), and also:
 
 | Key | What |
 |---|---|
@@ -172,6 +173,9 @@ would otherwise run the agent without that review (your own box, your own comman
 - Everything but `/ollama` and the login page needs `API_KEY`. The page's login is a cookie
   derived from the key; the API takes only the key itself, so other sites can't use the
   cookie to call it.
+- A service's web UI (`homelab.ai.ui`) gets the page's login in front of it; the login cookie
+  and any Authorization header stay with the switcher, and it's `SameSite=Lax`, so other sites
+  can't post to the UI with it.
 - With Docker it only gets a socket proxy that can list, start and stop containers: no
   creating containers, running commands in them or reading their files.
 - Listen on `127.0.0.1` unless something in front of it (Caddy, Tailscale) needs more.

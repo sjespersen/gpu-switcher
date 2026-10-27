@@ -162,7 +162,7 @@ function stateText(s, switchingTo) {
   return ['on', 'on the GPU'];
 }
 function openLink(s) {
-  const link = s.site ? siteLink('ai', s.site) : '';
+  const link = s.ui ? `/_ai/ui/${encodeURIComponent(s.id)}/` : s.site ? siteLink('ai', s.site) : '';
   return link && s.state === 'running' ? `<a class="btn" href="${esc(link)}">Open ${icon('arrow')}</a>` : '';
 }
 function nowCard(d, svcs) {
