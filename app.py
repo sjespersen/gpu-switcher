@@ -978,18 +978,25 @@ def tokens(response):
     return f"{n_in} → {n_out} tokens" if n_in is not None or n_out is not None else ""
 
 
-def stats_begin(sid):
+def stats_begin(sid, streamed):
+    """A request starts: prefill until its first token; one that isn't streamed is just "busy"
+    (its tokens all come at the end)."""
     with api:
         st = stats.setdefault(sid, {"active": 0})
         st["active"] += 1
-        st.update(phase="prefill", since=time.time(), first=None, streamed=0)
+        st.update(phase="prefill" if streamed else "busy", since=time.time(), first=None, streamed=0)
         return st
 
 
+# A streamed token: a non-empty text field in an event (OpenAI's and Anthropic's deltas, Ollama's
+# lines). Empty ones (the first event's role, the last one's finish) don't count.
+TOKEN_FIELD = re.compile(rb'"(?:content|reasoning_content|reasoning|text|thinking|response|'
+                         rb'partial_json|arguments)":\s*"[^"]')
+
+
 def stats_chunk(st, chunk):
-    """Counts a streamed piece of the answer: one event (OpenAI's or Anthropic's delta, a line
-    of Ollama's) is about one token."""
-    n = chunk.count(b'"delta":') + chunk.count(b'"done":false')
+    """Counts a streamed piece of the answer: each event with text is about one token."""
+    n = len(TOKEN_FIELD.findall(chunk)) if st["phase"] != "busy" else 0
     if not n:
         return
     with api:
@@ -1344,7 +1351,10 @@ class Handler(BaseHTTPRequestHandler):
         with sid, counts it in that service's stats."""
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
         keep = log is not None or sid is not None
-        st = stats_begin(sid) if sid is not None else None
+        # Ollama streams unless told not to; the OpenAI and Anthropic APIs only when asked.
+        streams = (not re.search(rb'"stream"\s*:\s*false', body or b"") if sid == "ollama"
+                   else bool(re.search(rb'"stream"\s*:\s*true', body or b"")))
+        st = stats_begin(sid, streams) if sid is not None else None
         if keep:
             headers.pop("Accept-Encoding", None)   # the copy for the log stays readable
             headers.pop("accept-encoding", None)

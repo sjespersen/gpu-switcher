@@ -222,6 +222,7 @@ function runningCard(h, d) {
   if (h.health === 'starting') [cls, text] = ['busy', 'Loading the model…'];
   else if (h.health === 'unhealthy') [cls, text] = ['bad', 'Not answering'];
   else if (h.stats && h.stats.phase === 'prefill') [cls, text] = ['busy', 'Reading the prompt…'];
+  else if (h.stats && h.stats.phase === 'busy') [cls, text] = ['on', 'Answering…'];
   else if (h.stats && h.stats.phase === 'decode') [cls, text] = ['on', 'Writing' + (h.stats.live_tps ? ` · ${h.stats.live_tps} tok/s` : '…')];
   else if (h.always_on) text = 'Loaded';
   const meta = [];
@@ -329,7 +330,7 @@ const kTok = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : Str
 function modelStats(s) {
   const st = s.stats || {}, last = st.last || {}, phase = st.phase || 'idle';
   const hist = H['tps' + s.id] || [], peak = Math.max(20, ...hist);
-  let state = metric('Status', s.health === 'starting' ? 'loading' : phase === 'decode' ? 'decode' : phase === 'prefill' ? 'prefill' : 'idle',
+  let state = metric('Status', s.health === 'starting' ? 'loading' : phase === 'busy' ? 'working' : phase,
     '', s.health === 'starting' ? 'the model is loading'
       : phase === 'idle' ? (last.at ? `last answer <span data-since="${last.at}"></span> ago` : 'no request yet')
       : `${st.active > 1 ? st.active + ' requests · ' : ''}for <span data-since="${st.since}"></span>`, phase === 'idle' ? '' : 'warn');
