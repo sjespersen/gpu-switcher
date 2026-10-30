@@ -20,11 +20,8 @@
       <div class="card-head"><h2>GPU</h2><span class="hint">One thing per card · a model picked in the web chat or the API starts by itself</span></div>
       <div class="held-note" id="hold" hidden></div>
       <div id="now"></div>
-      <div id="modes-box"><h3 class="subhead">Modes <button class="small" id="edit-modes">Edit</button></h3>
-        <div class="choices" id="modes"></div>
-        <div id="mode-editor" hidden></div>
-        <h3 class="subhead">Single services</h3></div>
-      <div class="choices" id="choices"></div>
+      <div class="actions"><span class="state" id="mode-now"></span><span style="flex:1"></span>
+        <button class="primary" id="open-switch">Switch…</button></div>
     </section>
     <section class="card" data-o="3"><div class="card-head"><h2>Services</h2></div><div class="linklist" id="links"></div></section>
     <section class="card" data-o="5">
@@ -45,6 +42,15 @@
     <div id="leds" data-o="6"></div>
   </div>
 </div>
+<dialog id="switch-dlg" aria-labelledby="switch-title">
+  <div class="dlg-head"><h2 id="switch-title">Switch</h2><span class="hint">A mode puts services on both cards and stops the rest; a single service stops only what shares its card</span>
+    <button class="small" id="close-switch">Close</button></div>
+  <h3 class="subhead">Modes <button class="small" id="edit-modes">Edit</button></h3>
+  <div class="choices" id="modes"></div>
+  <div id="mode-editor" hidden></div>
+  <h3 class="subhead">Single services</h3>
+  <div class="choices" id="choices"></div>
+</dialog>
 <footer>Updates every 3 seconds.</footer>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -390,13 +396,16 @@ async function load() {
   setHTML('now', nowCard(d, svcs));
   LAST = d;
   const modes = d.scenarios || [];
+  const on = modes.find(m => m.active);
+  document.getElementById('mode-now').textContent = on ? `Mode: ${on.title}` : modes.length ? 'No mode: single services' : '';
   setHTML('modes', modes.map(m => modeCard(m, d)).join('')
     || '<div class="state">No modes yet: Edit makes one (services that run together, one per card).</div>');
   // A variant (another model on the same engine) has no card: requests naming its model start it.
   setHTML('choices', svcs.filter(s => !s.variant_of).map(s => choice(s, d)).join(''));
   setHTML('vitals', vitals(d));
-  setHTML('api-models', svcs.filter(s => s.models && s.models.length)
-    .map(s => `<span class="chip">${esc(s.models[0])}</span>`).join(''));
+  // One name per model, even with several placements of it.
+  setHTML('api-models', [...new Set(svcs.filter(s => s.models && s.models.length).map(s => s.models[0]))]
+    .map(m => `<span class="chip">${esc(m)}</span>`).join(''));
   const idle = d.idle_stop;
   document.getElementById('idle').textContent = (d.idle_minutes
     ? `The chat model stops after ${d.idle_minutes} min without requests; the next one starts it again (1-2 min).`
@@ -498,8 +507,9 @@ async function post(body) {
   if (!r.ok) showError((await r.json()).error);
   load();
 }
-const go = id => post({service: id});
-const mode = id => post({scenario: id});
+const dlg = document.getElementById('switch-dlg');
+const go = id => { dlg.close(); post({service: id}); };
+const mode = id => { dlg.close(); post({scenario: id}); };
 const stopOne = id => post({stop: id});
 // --- The mode editor: built when opened and not redrawn by the 3-second updates, so typing
 // isn't lost. The box checks again on Save (cards, groups, RAM).
@@ -576,5 +586,10 @@ async function saveModes() {
   load();
 }
 document.getElementById('edit-modes').onclick = openEditor;
+document.getElementById('open-switch').onclick = () => dlg.showModal();
+document.getElementById('close-switch').onclick = () => dlg.close();
+// A click on the dimmed backdrop closes it too (the click lands on the dialog element itself).
+dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+dlg.addEventListener('close', () => { if (EDIT) closeEditor(); });
 loadLinks().then(load); setInterval(load, 3000);
 </script></main></body></html>

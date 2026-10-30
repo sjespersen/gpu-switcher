@@ -208,3 +208,8 @@ footer { margin-top: 14px; color: var(--faint); font-size: 11px; }
 .epick { display: grid; gap: 4px 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); font-size: 13px; }
 .epick label { display: flex; gap: 6px; align-items: baseline; } .epick .hint { margin-left: auto; }
 [hidden] { display: none !important; }
+dialog#switch-dlg { width: min(960px, calc(100% - 32px)); max-height: 86vh; overflow: auto; padding: 16px 18px;
+  background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; }
+dialog#switch-dlg::backdrop { background: rgba(0, 0, 0, .55); }
+.dlg-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.dlg-head .hint { flex: 1; }
