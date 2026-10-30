@@ -17,9 +17,13 @@
 <div class="cols">
   <div class="col">
     <section class="card">
-      <div class="card-head"><h2>GPU</h2><span class="hint">One at a time · a model picked in the web chat or the API switches by itself</span></div>
+      <div class="card-head"><h2>GPU</h2><span class="hint">One thing per card · a model picked in the web chat or the API starts by itself</span></div>
       <div class="held-note" id="hold" hidden></div>
       <div id="now"></div>
+      <div id="modes-box"><h3 class="subhead">Modes <button class="small" id="edit-modes">Edit</button></h3>
+        <div class="choices" id="modes"></div>
+        <div id="mode-editor" hidden></div>
+        <h3 class="subhead">Single services</h3></div>
       <div class="choices" id="choices"></div>
     </section>
     <section class="card" data-o="3"><div class="card-head"><h2>Services</h2></div><div class="linklist" id="links"></div></section>
@@ -111,7 +115,7 @@ async function copy(text, btn) {
 }
 
 // --- Time: the box's clock (the status says it), so countdowns don't depend on this device's clock.
-let OFFSET = 0, lastOk = 0, switchSeen = null;
+let OFFSET = 0, lastOk = 0, switchSeen = null, LAST = null;
 const now = () => Date.now() / 1000 + OFFSET;
 const clock = s => { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 function span(s) {
@@ -147,14 +151,37 @@ function setHTML(id, html) {
 
 // --- Services
 const holds = s => s.always_on ? !!(s.loaded && s.loaded.length) : s.state === 'running';
+const ready = s => s.state === 'running' && s.health !== 'starting';
 const shortName = m => String(m).split('/').pop();
 const kindOf = s => s.always_on ? 'web' : s.kind === 'image' ? 'image' : 'chat';
 const TAGS = {chat: 'Chat · API and web chat', web: 'Web chat · always running', image: 'Images'};
 const startedAt = s => { const t = Date.parse(s.started || ''); return t > 0 ? t / 1000 : 0; };
-function stateText(s, switchingTo) {
-  if (switchingTo === s.id) return ['busy', 'switching…'];
-  if (switchingTo && s.always_on && s.loaded && s.loaded.length) return ['busy', 'unloading…'];
-  if (switchingTo && s.state === 'running' && !s.always_on) return ['busy', 'stopping…'];
+// The cards a service uses, by name (null: all of them), and whether two can't run at once (as the box decides).
+const cardsOf = (s, d) => {
+  const all = d.gpus || [];
+  if (all.length < 2) return '';
+  if (!s.gpus) return 'all cards';
+  return s.gpus.map(i => { const g = all.find(x => x.index === i); return g ? cardName(g.name) : 'GPU ' + i; }).join(' + ');
+};
+const clash = (a, b) => a.id !== b.id && ((a.group && a.group === b.group) || !a.gpus || !b.gpus || a.gpus.some(i => b.gpus.includes(i)));
+// What the switch under way starts and what it stops (the box's plan, without the RAM part).
+function plan(d) {
+  const sw = d.switching, svcs = d.services;
+  if (!sw) return {start: [], stop: [], mode: null};
+  if (sw.startsWith('stop:')) return {start: [], stop: svcs.filter(s => s.id === sw.slice(5)), mode: null};
+  if (sw === 'none') return {start: [], stop: svcs.filter(holds), mode: null};
+  if (sw.startsWith('scenario:')) {
+    const mode = (d.scenarios || []).find(m => m.id === sw.slice(9));
+    const ids = mode ? mode.services : [];
+    return {start: svcs.filter(s => ids.includes(s.id)), mode,
+            stop: svcs.filter(s => holds(s) && !ids.includes(s.id) && (!s.always_on || ids.some(id => clash(s, svcs.find(x => x.id === id)))))};
+  }
+  const t = svcs.find(s => s.id === sw);
+  return {start: t ? [t] : [], stop: t ? svcs.filter(s => holds(s) && clash(s, t)) : [], mode: null};
+}
+function stateText(s, d, p) {
+  if (p.start.includes(s) && !ready(s)) return ['busy', s.state === 'running' ? 'loading…' : 'starting…'];
+  if (p.stop.includes(s)) return ['busy', s.always_on ? 'unloading…' : 'stopping…'];
   if (s.state !== 'running') return ['off', 'stopped'];
   if (s.always_on) return holds(s) ? ['on', 'on the GPU'] : ['', 'ready, nothing loaded'];
   if (s.health === 'starting') return ['busy', 'starting'];
@@ -165,35 +192,25 @@ function openLink(s) {
   const link = s.ui ? `/_ai/ui/${encodeURIComponent(s.id)}/` : s.site ? siteLink('ai', s.site) : '';
   return link && s.state === 'running' ? `<a class="btn" href="${esc(link)}">Open ${icon('arrow')}</a>` : '';
 }
-function nowCard(d, svcs) {
+function switchCard(d, p) {
   const sw = d.switching;
-  if (!sw) switchSeen = null;
-  else {
-    if (!switchSeen || switchSeen.to !== sw) switchSeen = {to: sw, at: now()};
-    const target = svcs.find(s => s.id === sw);
-    const others = svcs.filter(s => s.id !== sw && holds(s));
-    const steps = [[others.length ? 'Stop ' + others.map(s => s.title).join(', ') : 'Free the GPU', !others.length]];
-    if (target) steps.push(['Start the container', target.state === 'running'],
-                           ['Load the model', target.state === 'running' && target.health !== 'starting']);
-    const cur = steps.findIndex(s => !s[1]);
-    const list = steps.map(([label], i) =>
-      `<li class="${cur === -1 || i < cur ? 'done' : i === cur ? 'doing' : ''}">${esc(label)}</li>`).join('');
-    const k = target ? kindOf(target) : '';
-    return `<div class="now switching k-${k}"><div class="now-icon">${icon(target ? k : 'idle')}</div>
-      <div class="now-main"><div class="now-state busy"><span class="dot pulse"></span>${target ? 'Switching to' : 'Stopping'}</div>
-        <div class="now-title">${esc(target ? target.title : 'Freeing the GPU')}</div>
-        <ol class="steps">${list}</ol>
-        ${target && target.health === 'starting' ? '<div class="hint" style="margin-top:4px">A first start downloads the model, which can take a while.</div>' : ''}</div>
-      <div class="now-actions"><span class="timer" data-clock="${switchSeen.at}"></span></div></div>`;
-  }
-  const h = svcs.find(holds);
-  if (!h) {
-    const last = d.idle_stop;
-    return `<div class="now free"><div class="now-icon">${icon('idle')}</div><div class="now-main">
-      <div class="now-state"><span class="dot"></span>Nothing loaded</div><div class="now-title">The GPU is free</div>
-      <div class="now-meta">Pick a model below, or just send a request: the API and the web chat start the model they ask for.
-      ${last ? `<span>Last idle stop: ${esc(last.service)}, <span data-since="${last.at}"></span> ago.</span>` : ''}</div></div></div>`;
-  }
+  if (!switchSeen || switchSeen.to !== sw) switchSeen = {to: sw, at: now()};
+  const steps = [];
+  if (p.stop.length) steps.push(['Stop ' + p.stop.map(s => s.title).join(', '), !p.stop.some(holds)]);
+  for (const t of p.start) steps.push([`Start ${t.title}`, t.state === 'running'], [`Load ${t.title}`, ready(t)]);
+  const cur = steps.findIndex(s => !s[1]);
+  const list = steps.map(([label], i) =>
+    `<li class="${cur === -1 || i < cur ? 'done' : i === cur ? 'doing' : ''}">${esc(label)}</li>`).join('');
+  const one = p.start.length === 1 ? p.start[0] : null, k = one ? kindOf(one) : '';
+  const title = p.mode ? p.mode.title : one ? one.title : p.stop.map(s => s.title).join(', ') || 'Freeing the GPU';
+  return `<div class="now switching k-${k}"><div class="now-icon">${icon(one ? k : p.mode ? 'grid' : 'idle')}</div>
+    <div class="now-main"><div class="now-state busy"><span class="dot pulse"></span>${p.start.length ? 'Switching to' : 'Stopping'}</div>
+      <div class="now-title">${esc(title)}</div>
+      <ol class="steps">${list}</ol>
+      ${p.start.some(t => t.health === 'starting') ? '<div class="hint" style="margin-top:4px">A first start downloads the model, which can take a while.</div>' : ''}</div>
+    <div class="now-actions"><span class="timer" data-clock="${switchSeen.at}"></span></div></div>`;
+}
+function runningCard(h, d) {
   const k = kindOf(h);
   let cls = 'on', text = 'Ready';
   if (h.health === 'starting') [cls, text] = ['busy', 'Loading the model…'];
@@ -201,6 +218,8 @@ function nowCard(d, svcs) {
   else if (h.models && h.models.length && d.requests) [cls, text] = ['on', `Answering ${d.requests} request${d.requests > 1 ? 's' : ''}`];
   else if (h.always_on) text = 'Loaded';
   const meta = [];
+  const cards = cardsOf(h, d);
+  if (cards) meta.push(`<span>${icon('gpu')} <b>${esc(cards)}</b></span>`);
   if (h.always_on) (h.loaded || []).forEach(m => meta.push(`<code title="${esc(m)}">${esc(shortName(m))}</code>`));
   else if (h.models && h.models.length) meta.push(`<code>${esc(h.models[0])}</code>`);
   if (!h.always_on && startedAt(h)) meta.push(`<span>up <b data-since="${startedAt(h)}"></b></span>`);
@@ -208,21 +227,53 @@ function nowCard(d, svcs) {
   return `<div class="now k-${k}"><div class="now-icon">${icon(k)}</div>
     <div class="now-main"><div class="now-state ${cls}"><span class="dot ${cls === 'on' ? 'pulse' : ''}"></span>${text}</div>
       <div class="now-title">${esc(h.title)}</div><div class="now-meta">${meta.join('')}</div></div>
-    <div class="now-actions">${openLink(h)}<button onclick="go('none')" ${d.switching ? 'disabled' : ''}>${h.always_on ? 'Unload' : 'Stop'}</button></div></div>`;
+    <div class="now-actions">${openLink(h)}<button onclick="stopOne('${esc(h.id)}')" ${d.switching ? 'disabled' : ''}>${h.always_on ? 'Unload' : 'Stop'}</button></div></div>`;
+}
+function nowCard(d, svcs) {
+  const p = plan(d);
+  if (!d.switching) switchSeen = null;
+  const running = svcs.filter(s => holds(s) && !p.stop.includes(s) && !p.start.includes(s));
+  const parts = (d.switching ? [switchCard(d, p)] : []).concat(running.map(h => runningCard(h, d)));
+  if (parts.length) return parts.join('');
+  const last = d.idle_stop;
+  return `<div class="now free"><div class="now-icon">${icon('idle')}</div><div class="now-main">
+    <div class="now-state"><span class="dot"></span>Nothing loaded</div><div class="now-title">The GPU is free</div>
+    <div class="now-meta">Pick a mode or a model below, or just send a request: the API and the web chat start the model they ask for.
+    ${last ? `<span>Last idle stop: ${esc(last.service)}, <span data-since="${last.at}"></span> ago.</span>` : ''}</div></div></div>`;
+}
+function modeCard(m, d) {
+  const p = plan(d), target = p.mode && p.mode.id === m.id;
+  const parts = m.services.map(id => d.services.find(s => s.id === id)).filter(Boolean);
+  const list = parts.map(s => `<span class="chip ${holds(s) ? '' : 'plain'}" title="${esc(s.about)}">${esc(s.title)}${cardsOf(s, d) ? ' · ' + esc(cardsOf(s, d)) : ''}</span>`).join('');
+  const ram = m.ram ? `<span class="chip plain">~${Math.round(m.ram)} GB RAM</span>` : '';
+  const btn = m.active || target ? '' : `<button class="primary small" ${d.switching ? 'disabled' : ''} onclick="mode('${esc(m.id)}')">Use</button>`;
+  const [cls, text] = target ? ['busy', 'switching…'] : m.active ? ['on', 'active'] : ['off', 'off'];
+  return `<div class="choice k-mode ${m.active ? 'active' : ''} ${target ? 'target' : ''}">
+    <div class="choice-top"><span class="kicon">${icon('grid')}</span><div style="min-width:0">
+      <div class="tag">Mode</div><div class="choice-title">${esc(m.title)}</div></div></div>
+    <div class="choice-about">${esc(m.about)}</div>
+    <div class="chips">${list}${ram}</div>
+    <div class="choice-foot"><span class="pill ${cls}">${text}</span>${btn}</div></div>`;
 }
 function choice(s, d) {
-  const k = kindOf(s), active = holds(s) && !d.switching, target = d.switching === s.id;
-  const [cls, text] = stateText(s, d.switching);
+  const k = kindOf(s), p = plan(d), active = holds(s) && !p.stop.includes(s), target = p.start.includes(s);
+  const [cls, text] = stateText(s, d, p);
   const chips = [];
   if (s.models && s.models.length) chips.push(`<span class="chip">${esc(s.models[0])}</span>`);
+  const cards = cardsOf(s, d);
+  if (cards) chips.push(`<span class="chip plain">${esc(cards)}</span>`);
+  if (s.ram) chips.push(`<span class="chip plain">~${Math.round(s.ram)} GB RAM</span>`);
   if (s.always_on && s.installed != null) chips.push(`<span class="chip plain">${s.installed} models installed</span>`);
   let btn = '';
   if (active || target) btn = '';
   else if (s.always_on) {
-    // Ollama is always running; "using" it means making room on the GPU for its models.
-    const other = d.services.find(o => o.id !== s.id && holds(o));
-    if (other) btn = `<button class="small" title="Stops ${esc(other.title)}, so the web chat's Ollama models load right away" ${d.switching ? 'disabled' : ''} onclick="go('${esc(s.id)}')">Make room</button>`;
-  } else btn = `<button class="primary small" ${d.switching ? 'disabled' : ''} onclick="go('${esc(s.id)}')">Use</button>`;
+    // Ollama is always running; "using" it means making room on its cards for its models.
+    const other = d.services.filter(o => holds(o) && clash(o, s));
+    if (other.length) btn = `<button class="small" title="Stops ${esc(other.map(o => o.title).join(', '))}, so the web chat's Ollama models load right away" ${d.switching ? 'disabled' : ''} onclick="go('${esc(s.id)}')">Make room</button>`;
+  } else {
+    const other = d.services.filter(o => holds(o) && clash(o, s));
+    btn = `<button class="primary small" ${other.length ? `title="Stops ${esc(other.map(o => o.title).join(', '))}"` : ''} ${d.switching ? 'disabled' : ''} onclick="go('${esc(s.id)}')">Use</button>`;
+  }
   return `<div class="choice k-${k} ${active ? 'active' : ''} ${target ? 'target' : ''}">
     <div class="choice-top"><span class="kicon">${icon(k)}</span><div style="min-width:0">
       <div class="tag">${TAGS[k]}</div><div class="choice-title">${esc(s.title)}</div></div></div>
@@ -326,16 +377,21 @@ async function load() {
   err.textContent = d.error || ''; err.hidden = !d.error;
   if (!d.services) { tick(); return; }  // Docker didn't answer; keep the last view
   for (const g of d.gpus || []) record('gpu' + g.index, g.util); record('cpu', d.cpu && d.cpu.load); record('power', d.total_power);
-  const svcs = d.services, holder = svcs.find(holds), target = svcs.find(s => s.id === d.switching);
+  const svcs = d.services, holders = svcs.filter(holds), p = plan(d);
+  const what = p.mode ? p.mode.title : p.start.length ? p.start.map(s => s.title).join(', ') : '';
   document.getElementById('holder').innerHTML = d.switching
-    ? `<span class="state busy">Switching to ${esc(target ? target.title : 'nothing')}…</span>`
-    : holder ? `<span class="state on">● ${esc(holder.title)}${holder.always_on ? ' (' + esc(shortName(holder.loaded[0])) + ')' : ''} has the GPU</span>`
+    ? `<span class="state busy">${what ? 'Switching to ' + esc(what) : 'Stopping ' + esc(p.stop.map(s => s.title).join(', ') || 'everything')}…</span>`
+    : holders.length ? `<span class="state on">● ${holders.map(h => esc(h.title) + (h.always_on ? ' (' + esc(shortName(h.loaded[0])) + ')' : '')).join(' · ')}</span>`
     : 'The GPU is free';
-  favicon(d.switching ? '#e3b350' : holder ? '#72e09e' : '');
+  favicon(d.switching ? '#e3b350' : holders.length ? '#72e09e' : '');
   document.body.classList.toggle('held', !!d.hold);
   document.getElementById('hold').textContent = d.hold ? `${d.hold} is using the GPU: switching is off until it's done.` : '';
   document.getElementById('hold').hidden = !d.hold;
   setHTML('now', nowCard(d, svcs));
+  LAST = d;
+  const modes = d.scenarios || [];
+  setHTML('modes', modes.map(m => modeCard(m, d)).join('')
+    || '<div class="state">No modes yet: Edit makes one (services that run together, one per card).</div>');
   // A variant (another model on the same engine) has no card: requests naming its model start it.
   setHTML('choices', svcs.filter(s => !s.variant_of).map(s => choice(s, d)).join(''));
   setHTML('vitals', vitals(d));
@@ -436,11 +492,89 @@ async function power(b) {
     state.textContent = 'Could not reach the box: ' + e.message;
   }
 }
-async function go(id) {
+async function post(body) {
   const r = await fetch('/_ai/api/switch', {method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({service: id})});
+    body: JSON.stringify(body)});
   if (!r.ok) showError((await r.json()).error);
   load();
 }
+const go = id => post({service: id});
+const mode = id => post({scenario: id});
+const stopOne = id => post({stop: id});
+// --- The mode editor: built when opened and not redrawn by the 3-second updates, so typing
+// isn't lost. The box checks again on Save (cards, groups, RAM).
+let EDIT = null;
+const slug = t => t.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'mode';
+function editProblems(m, d) {
+  const picked = m.services.map(id => d.services.find(s => s.id === id)).filter(Boolean), out = [];
+  picked.forEach((a, i) => picked.slice(i + 1).forEach(b => { if (clash(a, b)) out.push(`${a.title} and ${b.title} can't run together`); }));
+  const ram = picked.reduce((n, s) => n + (s.always_on ? 0 : s.ram || 0), 0);
+  if (d.ram_gb && ram > d.ram_gb) out.push(`needs ${Math.round(ram)} GB RAM, the box allows ${Math.round(d.ram_gb)}`);
+  if (!m.title.trim()) out.push('needs a title');
+  if (!picked.length) out.push('pick at least one service');
+  return [out, ram];
+}
+function renderEditor() {
+  const d = LAST, box = document.getElementById('mode-editor');
+  const svcs = d.services.filter(s => !s.always_on);
+  box.innerHTML = `<div class="editor">${EDIT.map((m, i) => {
+    const [problems, ram] = editProblems(m, d);
+    return `<div class="emode">
+      <div class="erow"><input data-i="${i}" data-f="title" placeholder="Title" value="${esc(m.title)}" maxlength="60">
+        <button class="small" data-del="${i}">Delete</button></div>
+      <input data-i="${i}" data-f="about" placeholder="One line about it" value="${esc(m.about)}" maxlength="200">
+      <div class="epick">${svcs.map(s => `<label title="${esc(s.about)}"><input type="checkbox" data-i="${i}" data-s="${esc(s.id)}" ${m.services.includes(s.id) ? 'checked' : ''}>
+        ${esc(s.title)}<span class="hint">${esc(cardsOf(s, d) || '')}${s.ram ? ' · ' + Math.round(s.ram) + ' GB' : ''}</span></label>`).join('')}</div>
+      <div class="hint" id="eprob-${i}">${problems.length ? '<span class="state bad">' + esc(problems.join(' · ')) + '</span>' : `~${Math.round(ram)} GB RAM`}</div></div>`;
+  }).join('')}
+    <div class="actions"><button class="small" id="emode-add">Add a mode</button><span style="flex:1" class="state bad" id="emode-err"></span>
+      <button class="small" id="emode-cancel">Cancel</button><button class="primary small" id="emode-save">Save</button></div></div>`;
+  box.querySelectorAll('input[data-f]').forEach(el => el.oninput = () => {
+    EDIT[el.dataset.i][el.dataset.f] = el.value;
+    const [problems, ram] = editProblems(EDIT[el.dataset.i], LAST);
+    document.getElementById('eprob-' + el.dataset.i).innerHTML = problems.length
+      ? '<span class="state bad">' + esc(problems.join(' · ')) + '</span>' : `~${Math.round(ram)} GB RAM`;
+  });
+  box.querySelectorAll('input[data-s]').forEach(el => el.onchange = () => {
+    const m = EDIT[el.dataset.i];
+    m.services = el.checked ? [...m.services, el.dataset.s] : m.services.filter(x => x !== el.dataset.s);
+    renderEditor();
+  });
+  box.querySelectorAll('[data-del]').forEach(el => el.onclick = () => { EDIT.splice(+el.dataset.del, 1); renderEditor(); });
+  document.getElementById('emode-add').onclick = () => { EDIT.push({id: '', title: '', about: '', services: []}); renderEditor(); };
+  document.getElementById('emode-cancel').onclick = closeEditor;
+  document.getElementById('emode-save').onclick = saveModes;
+}
+function openEditor() {
+  if (!LAST) return;
+  EDIT = (LAST.scenarios || []).map(m => ({id: m.id, title: m.title, about: m.about, services: [...m.services]}));
+  document.getElementById('mode-editor').hidden = false;
+  document.getElementById('modes').hidden = true;
+  document.getElementById('edit-modes').hidden = true;
+  renderEditor();
+}
+function closeEditor() {
+  EDIT = null;
+  document.getElementById('mode-editor').hidden = true;
+  document.getElementById('modes').hidden = false;
+  document.getElementById('edit-modes').hidden = false;
+}
+async function saveModes() {
+  const used = new Set();
+  const modes = EDIT.map(m => {
+    let id = m.id || slug(m.title), n = 2;
+    while (used.has(id)) id = slug(m.title).slice(0, 37) + '-' + n++;
+    used.add(id);
+    return {...m, id};
+  });
+  const r = await fetch('/_ai/api/scenarios', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scenarios: modes})});
+  if (r.status === 401) { location.href = '/_ai/login?next=/'; return; }
+  const body = await r.json();
+  if (!r.ok) { document.getElementById('emode-err').textContent = body.error; return; }
+  closeEditor();
+  load();
+}
+document.getElementById('edit-modes').onclick = openEditor;
 loadLinks().then(load); setInterval(load, 3000);
 </script></main></body></html>

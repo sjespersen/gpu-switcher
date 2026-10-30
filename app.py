@@ -1,6 +1,8 @@
 """gpu-switcher: shows which GPU service runs and switches between them.
 
-Only one service can have the GPU, so switching stops the others first. Talks to Docker
+A service that wants a GPU stops the ones on the same card first (homelab.ai.gpus; without it a
+service takes every card), and those it couldn't share the RAM with (homelab.ai.ram). Modes
+(SCENARIOS_FILE) start several at once, one per card, and stop the rest. Talks to Docker
 through a proxy that allows listing, starting and stopping containers and nothing else.
 The services are the containers labelled homelab.ai.title (see the README). Login is the
 AI API key; Caddy also asks /_ai/auth before letting anyone into SwarmUI.
@@ -39,6 +41,11 @@ PROJECT = os.environ.get("PROJECT", "")
 # The services as commands to run, in place of Docker containers (see process_services).
 SERVICES_FILE = os.environ.get("SERVICES_FILE", "")
 STATE = os.environ.get("STATE_FILE", "/state/active")
+# Modes: named sets of services that run together, e.g. a chat model on one card and images on
+# the other. {"scenarios": [{"id", "title", "about", "services": [ids]}]}; without the file, none.
+SCENARIOS_FILE = os.environ.get("SCENARIOS_FILE") or os.path.join(os.path.dirname(STATE), "scenarios.json")
+# The RAM the services may use together, in GB (their homelab.ai.ram); 0: not checked.
+RAM_GB = float(os.environ.get("RAM_GB") or 0)
 # Where the page and the API listen: all interfaces in a container, 127.0.0.1 on your own computer.
 LISTEN = os.environ.get("LISTEN", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8079"))
@@ -130,6 +137,144 @@ def services():
     return process_services() if SERVICES_FILE else docker_services()
 
 
+def card_list(v):
+    """The cards a service uses: "0", "1", "0,1" or a list; empty or "all": None (every card)."""
+    if isinstance(v, list):
+        return sorted({int(x) for x in v}) or None
+    v = str(v).strip().lower()
+    if not v or v == "all":
+        return None
+    return sorted({int(x) for x in v.split(",") if x.strip()}) or None
+
+
+def conflicts(a, b):
+    """Whether two services can't run at once: a card in common (None is every card), or one group."""
+    if a["id"] == b["id"]:
+        return False
+    if a["group"] and a["group"] == b["group"]:
+        return True
+    return a["gpus"] is None or b["gpus"] is None or bool(set(a["gpus"]) & set(b["gpus"]))
+
+
+def holds_gpu(s):
+    """It has its cards now: running, or for Ollama, a model loaded."""
+    if s["always_on"]:
+        return s["state"] == "running" and bool(ollama_loaded())
+    return s["state"] in ("running", "restarting")
+
+
+def scenarios(all_services=None):
+    """The modes, each with the services that exist (unknown ids are left out). From
+    SCENARIOS_FILE (the page's editor saves there), else the "scenarios" in SERVICES_FILE."""
+    raw = []
+    for path in (SCENARIOS_FILE, SERVICES_FILE):
+        if not path:
+            continue
+        try:
+            with open(path) as f:
+                raw = json.load(f).get("scenarios", [])
+            break
+        except (OSError, ValueError, AttributeError):
+            continue
+    ids = {s["id"] for s in all_services} if all_services is not None else None
+    found = []
+    for e in raw:
+        if not isinstance(e, dict) or not e.get("id"):
+            continue
+        svcs = [x for x in e.get("services", []) if ids is None or x in ids]
+        found.append({"id": str(e["id"]), "title": e.get("title", e["id"]), "about": e.get("about", ""),
+                      "services": svcs})
+    return found
+
+
+MODE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+
+
+def save_scenarios(modes, all_services):
+    """Checks the page editor's modes and writes them to SCENARIOS_FILE (atomically). Returns an
+    error message, or None. A mode can't hold two services that share a card or group, nor more
+    than RAM_GB together."""
+    if not isinstance(modes, list) or len(modes) > 30:
+        return "modes must be a list (at most 30)"
+    by_id = {s["id"]: s for s in all_services}
+    out, seen = [], set()
+    for m in modes:
+        if not isinstance(m, dict):
+            return "each mode must be an object"
+        mid, title, about = str(m.get("id", "")), str(m.get("title", "")).strip(), str(m.get("about", "")).strip()
+        if not MODE_ID.fullmatch(mid):
+            return f"mode id {mid!r}: lowercase letters, digits and -, at most 40"
+        if mid in seen:
+            return f"mode id {mid} twice"
+        seen.add(mid)
+        if not title or len(title) > 60 or len(about) > 200:
+            return f"{mid}: a title (at most 60 characters) and an about line (at most 200)"
+        ids = m.get("services")
+        if not isinstance(ids, list) or not ids or len(ids) > 8 or len(set(map(str, ids))) != len(ids):
+            return f"{title}: pick one to eight services, each once"
+        unknown = [x for x in ids if x not in by_id]
+        if unknown:
+            return f"{title}: unknown service {unknown[0]}"
+        picked = [by_id[x] for x in ids]
+        for i, a in enumerate(picked):
+            for b in picked[i + 1:]:
+                if conflicts(a, b):
+                    return f"{title}: {a['title']} and {b['title']} can't run together (same card or group)"
+        ram = sum(x["ram"] for x in picked if not x["always_on"])
+        if RAM_GB and ram > RAM_GB:
+            return f"{title}: needs {ram:.0f} GB RAM, the box allows {RAM_GB:.0f}"
+        out.append({"id": mid, "title": title, "about": about, "services": list(ids)})
+    tmp = SCENARIOS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"scenarios": out}, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, SCENARIOS_FILE)
+    return None
+
+
+def plan(wanted, all_services, exclusive):
+    """What has to stop before <wanted> (service ids) can run: the running services that share a
+    card or group with one of them, all others too if <exclusive> (a mode), and then chat models
+    (biggest first) until the RAM is enough. Returns (to_stop, error)."""
+    want = [s for s in all_services if s["id"] in wanted]
+    stop = []
+    for s in all_services:
+        if s["id"] in wanted or not holds_gpu(s):
+            continue
+        if s["always_on"]:
+            # Ollama only gives its cards back (by unloading) when something wants them.
+            if any(conflicts(s, w) for w in want):
+                stop.append(s)
+        elif exclusive or any(conflicts(s, w) for w in want):
+            stop.append(s)
+    if RAM_GB:
+        stays = [s for s in all_services if holds_gpu(s) and s not in stop and s["id"] not in wanted]
+        need = sum(w["ram"] for w in want) + sum(s["ram"] for s in stays if not s["always_on"])
+        for s in sorted((s for s in stays if s["models"] and not s["always_on"]), key=lambda s: -s["ram"]):
+            if need <= RAM_GB:
+                break
+            stop.append(s)
+            need -= s["ram"]
+        if need > RAM_GB:
+            names = ", ".join(w["title"] for w in want)
+            return stop, f"not enough RAM for {names}: {need:.0f} of {RAM_GB:.0f} GB"
+    return stop, None
+
+
+def target_ids(target, all_services):
+    """The services a switch target names: a service id, "scenario:<id>", or "none"."""
+    if target == "none":
+        return [], True
+    if target.startswith("scenario:"):
+        sc = next((x for x in scenarios(all_services) if x["id"] == target[9:]), None)
+        if sc is None:
+            raise RuntimeError(f"unknown mode {target[9:]}")
+        return sc["services"], True
+    if target not in {s["id"] for s in all_services}:
+        raise RuntimeError(f"unknown service {target}")
+    return [target], False
+
+
 def start_service(s):
     if SERVICES_FILE:
         process_start(s)
@@ -170,6 +315,11 @@ def docker_services():
             # Another model on the same engine (that service's id): no card of its own on the page,
             # started by its model name like the others.
             "variant_of": labels.get("homelab.ai.variant-of", ""),
+            # The cards it uses (nvidia-smi's numbers; None: all of them), the RAM it takes in GB,
+            # and a group of services that can't run together (e.g. one data folder).
+            "gpus": card_list(labels.get("homelab.ai.gpus", "")),
+            "ram": float(labels.get("homelab.ai.ram") or 0),
+            "group": labels.get("homelab.ai.group", ""),
             "state": c["State"],  # running, exited, created, ...
             "health": health,     # starting, healthy, unhealthy or None
             "started": detail["State"].get("StartedAt"),
@@ -213,6 +363,9 @@ def process_services():
             "order": int(e.get("order", i + 1)),
             "always_on": bool(e.get("always_on")),
             "variant_of": e.get("variant_of", ""),
+            "gpus": card_list(e.get("gpus", "")),
+            "ram": float(e.get("ram") or 0),
+            "group": e.get("group", ""),
             "state": "running" if running else ("exited" if p is not None else "created"),
             "health": answers(host, port, e.get("health")) if running else None,
             "started": proc_started.get(sid),
@@ -464,33 +617,65 @@ def drop_cache(sub):
                 os.close(fd)
 
 
+def drop_unused(stopped, staying):
+    """Drops the stopped services' model files from the page cache, except a folder a service
+    that stays (or starts) also reads: a variant on the same engine, one model on two cards."""
+    keep = {s["files"] for s in staying if s["files"]}
+    for s in stopped:
+        f = s["files"]
+        if f and not s["always_on"] and not any(
+                k == f or k.startswith(f + "/") or f.startswith(k + "/") for k in keep):
+            drop_cache(f)
+
+
 def switch(target):
-    """Gives the GPU to service <target>, or to none ("none": stop them all)."""
+    """Gives the cards to <target>: a service (stopping those on its cards), a mode
+    ("scenario:<id>": its services, everything else stops) or "none" (stop them all)."""
     try:
         all_services = services()
-        if target != "none" and target not in {s["id"] for s in all_services}:
-            raise RuntimeError(f"unknown service {target}")
-        for s in all_services:
-            if s["id"] == target:
-                continue
+        wanted, exclusive = target_ids(target, all_services)
+        if target == "none":
+            stop = [s for s in all_services if holds_gpu(s)]
+        else:
+            stop, error = plan(wanted, all_services, exclusive)
+            if error:
+                raise RuntimeError(error)
+        for s in stop:
             if s["always_on"]:
-                if s["state"] == "running":
-                    ollama_unload()
-            elif s["state"] in ("running", "restarting"):
+                ollama_unload()
+            else:
                 stop_service(s)
-        if target != "none":
-            for s in all_services:
-                if s["id"] != target and not s["always_on"] and s["files"]:
-                    drop_cache(s["files"])
+        drop_unused(stop, [s for s in all_services if s["id"] in wanted or (holds_gpu(s) and s not in stop)])
         for s in all_services:
-            if (s["id"] == target or s["always_on"]) and s["state"] != "running":
+            if (s["id"] in wanted or s["always_on"]) and s["state"] != "running":
                 start_service(s)
         with open(STATE, "w") as f:
             f.write(target + "\n")
-        if any(s["id"] == target and s["models"] for s in all_services):
-            activity["chat"] = target
+        chat = next((s for s in all_services if s["id"] in wanted and s["models"]), None)
+        if chat:
+            activity["chat"] = chat["id"]
             with open(LAST_CHAT_FILE, "w") as f:
-                f.write(target + "\n")
+                f.write(chat["id"] + "\n")
+        switching["error"] = None
+    except Exception as e:
+        switching["error"] = str(e)
+    finally:
+        switching["to"] = None
+        lock.release()
+
+
+def stop_one(sid):
+    """Stops one service and nothing else (the page's Stop, an idle stop)."""
+    try:
+        all_services = services()
+        s = next((x for x in all_services if x["id"] == sid), None)
+        if s is None:
+            raise RuntimeError(f"unknown service {sid}")
+        if s["always_on"]:
+            ollama_unload()
+        elif holds_gpu(s):
+            stop_service(s)
+            drop_unused([s], [x for x in all_services if x["id"] != sid and holds_gpu(x)])
         switching["error"] = None
     except Exception as e:
         switching["error"] = str(e)
@@ -533,23 +718,26 @@ def ollama_unload():
 
 
 def ensure_ollama():
-    """Gives the GPU to Ollama for a request that runs a model: stops the 27B or Strata after
-    their requests finish. Returns an error message, or None."""
+    """Gives Ollama's cards to it for a request that runs a model: stops what runs there after
+    its requests finish. Returns an error message, or None."""
     deadline = time.time() + START_TIMEOUT
     while True:
         svcs = services()
         ollama = next((s for s in svcs if s["always_on"]), None)
         if ollama is None:
             return "no Ollama in this stack"
-        others = [s for s in svcs if not s["always_on"] and s["state"] in ("running", "restarting")]
+        others, error = plan([ollama["id"]], svcs, False)
         if ollama["state"] == "running" and not others:
             return None
+        if error:
+            return error
         image = [s for s in others if s["kind"] == "image"]
         if image:
             return f"{image[0]['title']} has the GPU; switch on the Local AI page"
-        # Let requests to the other model finish first.
+        # Let requests to the models in the way finish first.
+        ids = {s["id"] for s in others}
         with api:
-            api.wait_for(lambda: not any(n for sid, n in inflight.items() if sid != ollama["id"]),
+            api.wait_for(lambda: not any(n for sid, n in inflight.items() if sid in ids),
                          timeout=max(1, deadline - time.time()))
         if lock.acquire(timeout=120):
             switching["to"] = ollama["id"]
@@ -574,18 +762,30 @@ def chat_target(model, all_services):
     """The chat service for a request's model name: the service whose homelab.ai.model names
     it (or a longer name starting with it, like Strata's qwen3.8-flash-next-iq3_s; an exact name,
     then the longest such start wins, so a variant's qwen3.8-flash-next-coder isn't Strata's), else
-    the chat model that runs, else the last one used (kept across restarts), else the first."""
+    the chat model that runs, else the last one used (kept across restarts), else the first.
+    One model on several placements (e.g. both cards, or one card beside images): the one that
+    runs, else one that doesn't need a running image tool's card, else the first."""
     chat = [s for s in all_services if s["models"]]
     if not chat:
         return None
+
+    def best(found):
+        running = [s for s in found if s["state"] == "running"]
+        if running:
+            return running[0]
+        images = [o for o in all_services if o["kind"] == "image" and o["state"] in ("running", "restarting")]
+        free = [s for s in found if not any(conflicts(s, o) for o in images)]
+        return (free or found)[0]
+
     name = model.strip().lower() if isinstance(model, str) else ""
     if name:
         exact = [s for s in chat if name == s["id"] or name in s["models"]]
         if exact:
-            return exact[0]
+            return best(exact)
         starts = [(len(m), s) for s in chat for m in s["models"] if name.startswith(m + "-")]
         if starts:
-            return max(starts, key=lambda x: x[0])[1]
+            longest = max(n for n, _ in starts)
+            return best([s for n, s in starts if n == longest])
     for s in chat:
         if s["state"] == "running":
             return s
@@ -618,12 +818,16 @@ def ensure_running(target):
         if s["state"] != "running" and switching["to"] == target:
             pass  # the page is switching to it already (the image service may not have stopped yet)
         elif s["state"] != "running":
-            image = [o for o in svcs.values() if o["kind"] == "image" and o["state"] == "running"]
+            others, error = plan([target], list(svcs.values()), False)
+            if error:
+                return error
+            image = [o for o in others if o["kind"] == "image"]
             if image:
                 return f"{image[0]['title']} has the GPU; switch on the Local AI page"
-            # Let requests to the other model finish first.
+            # Let requests to the models in the way finish first.
+            ids = {o["id"] for o in others}
             with api:
-                api.wait_for(lambda: not any(n for sid, n in inflight.items() if sid != target),
+                api.wait_for(lambda: not any(n for sid, n in inflight.items() if sid in ids),
                              timeout=max(1, deadline - time.time()))
             if lock.acquire(timeout=120):
                 if {x["id"]: x for x in services()}[target]["state"] != "running":
@@ -668,8 +872,8 @@ def idle_watch():
                     continue
                 activity["stopping"] = True
             try:
-                switching["to"] = "none"
-                switch("none")  # releases the lock
+                switching["to"] = "stop:" + s["id"]
+                stop_one(s["id"])  # releases the lock; what runs on the other card stays
                 activity["idle_stop"] = {"service": s["title"], "at": int(time.time())}
             finally:
                 with api:
@@ -1215,12 +1419,18 @@ class Handler(BaseHTTPRequestHandler):
                 # When the idle watcher stops it (for the page's countdown), if nothing comes first.
                 if IDLE_MINUTES > 0 and s["models"] and s["state"] == "running":
                     s["idle_stop_at"] = max(activity["last"], started_at(s)) + IDLE_MINUTES * 60
+            modes = scenarios(svcs)
+            by_id = {s["id"]: s for s in svcs}
+            for m in modes:
+                runs = [by_id[x]["state"] == "running" for x in m["services"]]
+                m["active"] = bool(runs) and all(runs)
+                m["ram"] = sum(by_id[x]["ram"] for x in m["services"])
             cards, c = gpus(), cpu()
             g = gpu(cards)
             total = None
             if g and g.get("power") is not None and c.get("power") is not None:
                 total = g["power"] + c["power"] + REST_WATTS
-            return self.json({"services": svcs, "gpu": g, "gpus": cards, "cpu": c, "ram": ram(), "disks": disks(), "total_power": total,
+            return self.json({"services": svcs, "scenarios": modes, "ram_gb": RAM_GB, "gpu": g, "gpus": cards, "cpu": c, "ram": ram(), "disks": disks(), "total_power": total,
                               "rest_watts": REST_WATTS, "switching": switching["to"],
                               "error": switching["error"], "leds": leds(), "power": POWER,
                               "idle_minutes": IDLE_MINUTES, "idle_stop": activity["idle_stop"],
@@ -1251,7 +1461,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path.startswith("/_ai/ui/"):
             return self.service_ui()
         length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(min(length, 10000)).decode()
+        raw = self.rfile.read(min(length, 65536)).decode()  # the mode editor sends the most
         if url.path == "/_ai/login":
             form = urllib.parse.parse_qs(raw)
             key = (form.get("key") or [""])[0].strip()
@@ -1319,19 +1529,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": "bad request"}, 400)
             hold.update(by=by if seconds else None, until=time.time() + seconds if seconds else 0)
             return self.json({"hold": hold["by"], "until": hold["until"]})
+        if url.path == "/_ai/api/scenarios":
+            # The page's mode editor. JSON only: a form on another site can't send that type
+            # without the browser asking first, so the login cookie alone can't change modes.
+            if "application/json" not in self.headers.get("Content-Type", ""):
+                return self.json({"error": "send JSON"}, 415)
+            try:
+                modes = json.loads(raw or "{}").get("scenarios")
+            except (ValueError, AttributeError):
+                return self.json({"error": "bad request"}, 400)
+            try:
+                error = save_scenarios(modes, services())
+            except OSError as e:
+                error = f"can't save the modes: {e}"
+            if error:
+                return self.json({"error": error}, 400)
+            return self.json({"scenarios": scenarios(services())})
         if url.path == "/_ai/api/switch":
+            # {"service": id | "none"}, {"scenario": id} (a mode), or {"stop": id} (just that one).
             try:
                 req = json.loads(raw or "{}")
-                target = req.get("service", "")
+                if req.get("scenario"):
+                    target, run = "scenario:" + str(req["scenario"]), switch
+                elif req.get("stop"):
+                    target, run = str(req["stop"]), stop_one
+                else:
+                    target, run = str(req.get("service", "")), switch
             except (ValueError, AttributeError):
                 return self.json({"error": "bad request"}, 400)
             if hold["by"] and time.time() < hold["until"] and not req.get("force"):
                 return self.json({"error": f"{hold['by']} is using the GPU; stop it there first"}, 409)
             if not lock.acquire(blocking=False):
                 return self.json({"error": f"already switching to {switching['to']}"}, 409)
-            switching["to"] = target
-            threading.Thread(target=switch, args=(target,), daemon=True).start()
-            return self.json({"switching": target}, 202)
+            switching["to"] = "stop:" + target if run is stop_one else target
+            threading.Thread(target=run, args=(target,), daemon=True).start()
+            return self.json({"switching": switching["to"]}, 202)
         self.send(404, "not found")
 
 
