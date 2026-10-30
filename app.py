@@ -646,12 +646,24 @@ def switch(target):
             stop, error = plan(wanted, all_services, exclusive)
             if error:
                 raise RuntimeError(error)
-        for s in stop:
-            if s["always_on"]:
-                ollama_unload()
-            else:
-                stop_service(s)
-        drop_unused(stop, [s for s in all_services if s["id"] in wanted or (holds_gpu(s) and s not in stop)])
+        # All at once: Strata takes ~10 s to give back its locked RAM, the others under one.
+        failed = []
+        def stop_it(s):
+            try:
+                ollama_unload() if s["always_on"] else stop_service(s)
+            except Exception as e:
+                failed.append(e)
+        threads = [threading.Thread(target=stop_it, args=(s,)) for s in stop]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if failed:
+            raise failed[0]
+        # Beside the start, not before it: dropping a big model's cache takes seconds, and the
+        # engines that need the RAM at once (Strata's huge pages) take longer than that to get there.
+        threading.Thread(target=drop_unused, daemon=True,
+                         args=(stop, [s for s in all_services if s["id"] in wanted or (holds_gpu(s) and s not in stop)])).start()
         for s in all_services:
             if (s["id"] in wanted or s["always_on"]) and s["state"] != "running":
                 start_service(s)
@@ -1512,6 +1524,9 @@ class Handler(BaseHTTPRequestHandler):
                 links = []
             return self.json({"name": NAME, "links": links})
         if url.path == "/_ai/api/status":
+            # Read before the services: they take a moment, and a switch that ends meanwhile would
+            # otherwise look done while its services aren't in the list yet.
+            sw, sw_error = switching["to"], switching["error"]
             try:
                 svcs = services()
             except Exception as e:
@@ -1541,8 +1556,8 @@ class Handler(BaseHTTPRequestHandler):
             if g and g.get("power") is not None and c.get("power") is not None:
                 total = g["power"] + c["power"] + REST_WATTS
             return self.json({"services": svcs, "scenarios": modes, "ram_gb": RAM_GB, "gpu": g, "gpus": cards, "cpu": c, "ram": ram(), "disks": disks(), "total_power": total,
-                              "rest_watts": REST_WATTS, "switching": switching["to"],
-                              "error": switching["error"], "leds": leds(), "power": POWER,
+                              "rest_watts": REST_WATTS, "switching": sw,
+                              "error": sw_error, "leds": leds(), "power": POWER,
                               "idle_minutes": IDLE_MINUTES, "idle_stop": activity["idle_stop"],
                               "requests": activity["waiting"], "now": time.time(),
                               "hold": hold["by"] if time.time() < hold["until"] else None})
