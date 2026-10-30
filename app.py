@@ -276,20 +276,35 @@ def stop_all_processes(*_):
     raise SystemExit(0)
 
 
-def gpu():
+def gpus():
+    """Each card nvidia-smi sees, in its order (the PCI bus)."""
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
+            ["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10).stdout
-        name, used, total, util, temp, power = [x.strip() for x in out.splitlines()[0].split(",")]
-        try:
-            power = round(float(power))
-        except ValueError:
-            power = None  # "[N/A]" on some cards
-        return {"name": name, "used": int(used), "total": int(total), "util": int(util), "temp": int(temp),
-                "power": power}
+        cards = []
+        for row in out.splitlines():
+            index, name, used, total, util, temp, power = [x.strip() for x in row.split(",")]
+            try:
+                power = round(float(power))
+            except ValueError:
+                power = None  # "[N/A]" on some cards
+            cards.append({"index": int(index), "name": name, "used": int(used), "total": int(total),
+                          "util": int(util), "temp": int(temp), "power": power})
+        return cards
     except Exception:
+        return []
+
+
+def gpu(cards=None):
+    """All cards as one: memory and power added up, the busiest load and the hottest card."""
+    cards = gpus() if cards is None else cards
+    if not cards:
         return None
+    powers = [c["power"] for c in cards]
+    return {"name": " + ".join(c["name"] for c in cards), "used": sum(c["used"] for c in cards),
+            "total": sum(c["total"] for c in cards), "util": max(c["util"] for c in cards),
+            "temp": max(c["temp"] for c in cards), "power": None if None in powers else sum(powers)}
 
 
 # The CPU package's power in watts (homelab-cpu-power.service writes it every 2 s, from RAPL),
@@ -1200,11 +1215,12 @@ class Handler(BaseHTTPRequestHandler):
                 # When the idle watcher stops it (for the page's countdown), if nothing comes first.
                 if IDLE_MINUTES > 0 and s["models"] and s["state"] == "running":
                     s["idle_stop_at"] = max(activity["last"], started_at(s)) + IDLE_MINUTES * 60
-            g, c = gpu(), cpu()
+            cards, c = gpus(), cpu()
+            g = gpu(cards)
             total = None
             if g and g.get("power") is not None and c.get("power") is not None:
                 total = g["power"] + c["power"] + REST_WATTS
-            return self.json({"services": svcs, "gpu": g, "cpu": c, "ram": ram(), "disks": disks(), "total_power": total,
+            return self.json({"services": svcs, "gpu": g, "gpus": cards, "cpu": c, "ram": ram(), "disks": disks(), "total_power": total,
                               "rest_watts": REST_WATTS, "switching": switching["to"],
                               "error": switching["error"], "leds": leds(), "power": POWER,
                               "idle_minutes": IDLE_MINUTES, "idle_stop": activity["idle_stop"],

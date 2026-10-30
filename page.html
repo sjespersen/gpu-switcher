@@ -233,14 +233,17 @@ function choice(s, d) {
 
 // --- Vitals. Each kind of number has its own look: capacity as a bar, load as a 3-minute
 // history, temperature on a cool-to-hot scale, power split by where it goes.
-const H = {gpu: [], cpu: [], power: []};
-const record = (k, v) => { if (v == null) return; H[k].push(v); if (H[k].length > 60) H[k].shift(); };
+const H = {};
+const record = (k, v) => { if (v == null) return; const h = H[k] = H[k] || []; h.push(v); if (h.length > 60) h.shift(); };
 const gb = mib => (mib / 1024).toFixed(1);
 const lvl = (v, warn, bad) => v >= bad ? 'bad' : v >= warn ? 'warn' : '';
+const cardName = n => n.replace(/^NVIDIA (GeForce )?/, '');
+// The visual sits in a slot of one height, so graphs, scales and notes side by side line up.
 const metric = (label, value, visual, note, cls) =>
-  `<div class="m ${cls || ''}"><div class="m-top"><span class="m-label">${label}</span><span class="m-val">${value}</span></div>${visual}<div class="m-note">${note}</div></div>`;
+  `<div class="m ${cls || ''}"><div class="m-top"><span class="m-label">${label}</span><span class="m-val">${value}</span></div><div class="viz">${visual}</div><div class="m-note">${note}</div></div>`;
 function spark(vals, max, cls) {
   const W = 120, Hh = 26, N = 60;
+  vals = vals || [];
   const base = `<line x1="0" y1="${Hh - 0.5}" x2="${W}" y2="${Hh - 0.5}"/>`;
   if (!vals.length) return `<svg class="spark" viewBox="0 0 ${W} ${Hh}" preserveAspectRatio="none">${base}</svg>`;
   const pts = vals.map((v, i) => [(W * (N - vals.length + i) / (N - 1)).toFixed(1),
@@ -256,22 +259,25 @@ function temp(v, warn, bad) {
     v >= bad ? 'hot' : v >= warn ? 'warm' : 'cool', lvl(v, warn, bad));
 }
 const loadMetric = (v, hist, cls, note) => metric('Load', v != null ? `${v}<small>%</small>` : '–', spark(hist, 100, cls), note);
+const watts = w => w == null ? '' : ` · ${w} W`;
 const section = (ic, name, sub, body) =>
   `<div class="vsec"><div class="vhead">${icon(ic)}<span class="vname">${name}</span><span class="vsub">${sub}</span></div><div class="vgrid">${body}</div></div>`;
+// The biggest card first: that's the one the models are sized for.
+const byMemory = cards => [...cards].sort((a, b) => b.total - a.total || a.index - b.index);
 function vitals(d) {
-  const g = d.gpu, c = d.cpu || {}, m = d.ram, out = [];
-  if (g) {
+  const cards = byMemory(d.gpus || []), c = d.cpu || {}, m = d.ram, out = [];
+  for (const g of cards) {
     const n = Math.round(g.total / 1024), used = g.used / 1024;
     const cells = Array.from({length: n}, (_, i) =>
       `<i><b style="width:${Math.max(0, Math.min(1, used - i)) * 100}%"></b></i>`).join('');
-    out.push(section('gpu', 'GPU', esc(g.name.replace(/^NVIDIA (GeForce )?/, '')),
+    out.push(section('gpu', esc(cardName(g.name)), cards.length > 1 ? `GPU ${g.index}` : 'GPU',
       metric('Video memory', `${gb(g.used)}<small> / ${gb(g.total)} GB</small>`, `<div class="cells">${cells}</div>`,
         `${gb(g.total - g.used)} GB free`, 'wide')
-      + loadMetric(g.util, H.gpu, '', g.util >= 10 ? 'working' : 'idle')
+      + loadMetric(g.util, H['gpu' + g.index], '', (g.util >= 10 ? 'working' : 'idle') + watts(g.power))
       + temp(g.temp, 75, 83)));
   }
   out.push(section('cpu', 'CPU', (c.cores || '?') + ' threads',
-    loadMetric(c.load, H.cpu, 'cpu', c.load == null ? '' : c.load >= 85 ? 'busy' : c.load >= 10 ? 'working' : 'idle')
+    loadMetric(c.load, H.cpu, 'cpu', (c.load == null ? '' : c.load >= 85 ? 'busy' : c.load >= 10 ? 'working' : 'idle') + watts(c.power))
     + temp(c.temp, 75, 85)));
   if (m) {
     const p = 100 * m.used / m.total;
@@ -290,14 +296,16 @@ function vitals(d) {
   }
   let power;
   if (d.total_power != null) {
-    const parts = [['GPU', g.power, 'p-gpu', 'var(--accent)'], ['CPU', c.power, 'p-cpu', 'var(--cpu)'],
-                   ['Rest, estimated', d.rest_watts, 'p-rest', 'var(--rest)']];
-    const bar = parts.map(([, w, cls]) => `<i class="${cls}" style="width:${100 * w / d.total_power}%"></i>`).join('');
-    const legend = parts.map(([name, w, , color]) => `<span style="--c:${color}">${name} <b>${w} W</b></span>`).join('');
-    const peak = Math.max(150, ...H.power);
+    // Each card its own shade of the GPU colour, then the CPU, then the estimated rest.
+    const parts = cards.map((g, i) => [cards.length > 1 ? cardName(g.name) : 'GPU', g.power,
+                                       `color-mix(in srgb, var(--accent) ${100 - 40 * i}%, var(--card))`])
+      .concat([['CPU', c.power, 'var(--cpu)'], ['Rest, estimated', d.rest_watts, 'var(--rest)']]);
+    const bar = parts.map(([, w, color]) => `<i style="width:${100 * w / d.total_power}%;background:${color}"></i>`).join('');
+    const legend = parts.map(([name, w, color]) => `<span style="--c:${color}">${esc(name)} <b>${w} W</b></span>`).join('');
+    const peak = Math.max(150, ...(H.power || []));
     power = metric('Whole box', `≈ ${d.total_power}<small> W</small>`,
       `<div class="bar">${bar}</div><div class="legend">${legend}</div>${spark(H.power, peak)}`,
-      `GPU and CPU measured; ~${d.rest_watts} W for board, RAM, disks, fans`, 'wide big');
+      `GPU${cards.length > 1 ? 's' : ''} and CPU measured; ~${d.rest_watts} W for board, RAM, disks, fans`, 'wide big');
   } else {
     power = metric('Whole box', '–', '', c.power == null ? 'CPU power not measured' : 'the GPU reports no power', 'wide');
   }
@@ -317,7 +325,7 @@ async function load() {
   const err = document.getElementById('error');
   err.textContent = d.error || ''; err.hidden = !d.error;
   if (!d.services) { tick(); return; }  // Docker didn't answer; keep the last view
-  record('gpu', d.gpu && d.gpu.util); record('cpu', d.cpu && d.cpu.load); record('power', d.total_power);
+  for (const g of d.gpus || []) record('gpu' + g.index, g.util); record('cpu', d.cpu && d.cpu.load); record('power', d.total_power);
   const svcs = d.services, holder = svcs.find(holds), target = svcs.find(s => s.id === d.switching);
   document.getElementById('holder').innerHTML = d.switching
     ? `<span class="state busy">Switching to ${esc(target ? target.title : 'nothing')}…</span>`

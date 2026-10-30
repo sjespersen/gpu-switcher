@@ -165,7 +165,8 @@ would otherwise run the agent without that review (your own box, your own comman
 - `/ollama/...`: Ollama's own API, for Open WebUI and the like. Needs no login, so don't
   expose it beyond the machine or the compose network.
 - `GET /_ai/api/status`, `POST /_ai/api/switch {"service": "<id>" | "none"}`,
-  `POST /_ai/api/hold {"by": "<app>", "seconds": 90}`: what the page uses.
+  `POST /_ai/api/hold {"by": "<app>", "seconds": 90}`: what the page uses. The status has
+  `gpus` (each card) and `gpu` (all cards as one: memory and power added up, the busiest load).
 - `GET /_ai/auth`: 204 with a valid login, for a reverse proxy's forward auth.
 
 ## Security

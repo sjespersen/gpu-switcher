@@ -102,20 +102,24 @@ small { font-size: .62em; font-weight: 500; color: var(--muted); }
 .pill.off::before { background:transparent; border:1.5px solid currentColor; box-sizing:border-box; }
 
 /* The box's vitals: one look per kind of number (capacity bar, load history, temperature scale, watts) */
-.vsec { padding:10px 0; border-top:1px solid var(--line); }
+.vsec { padding:12px 0; border-top:1px solid var(--line); }
 .vsec:first-child { padding-top:0; border-top:0; }
 .vsec:last-child { padding-bottom:0; }
 .vhead { display:flex; align-items:center; gap:7px; margin-bottom:7px; }
 .vhead .ic { color:var(--muted); width:16px; height:16px; }
 .vname { font-weight:620; font-size:13px; }
 .vsub { color:var(--faint); font-size:12px; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.vgrid { display:grid; grid-template-columns: 1fr 1fr; gap:10px 16px; }
+.vgrid { display:grid; grid-template-columns: 1fr 1fr; gap:10px 20px; }
 .m { min-width:0; }
 .m.wide { grid-column: 1 / -1; }
 .m-top { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
 .m-label { font-size:11px; color:var(--muted); }
 .m-val { font-size:17px; font-weight:620; font-variant-numeric: tabular-nums; line-height:1.25; white-space:nowrap; }
 .m.big .m-val { font-size:24px; }
+/* Side by side, every visual gets the same slot, so a load graph and a temperature scale line up */
+.m:not(.wide) .viz { height:30px; display:flex; flex-direction:column; justify-content:flex-end; }
+.m:not(.wide) .viz .spark { margin-top:0; }
+.m:not(.wide) .viz .scale { margin:0 0 4px; }
 .m-note { font-size:11px; color:var(--faint); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .m.warn .m-val, .m.warn .m-note { color:var(--warn); } .m.bad .m-val, .m.bad .m-note { color:var(--bad); }
 .cells { display:grid; grid-auto-flow:column; grid-auto-columns:1fr; gap:2px; margin-top:5px; }
@@ -124,7 +128,6 @@ small { font-size: .62em; font-weight: 500; color: var(--muted); }
 .bar { height:8px; background:var(--soft); border-radius:4px; overflow:hidden; margin-top:5px; display:flex; }
 .bar > i { display:block; height:100%; background:var(--accent); transition: width .5s; }
 .m.warn .bar > i { background:var(--warn); } .m.bad .bar > i { background:var(--bad); }
-.bar .p-gpu { background:var(--accent); } .bar .p-cpu { background:var(--cpu); } .bar .p-rest { background:var(--rest); }
 .bar > i + i { border-left:2px solid var(--card); }
 .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:5px; }
 .legend span { display:inline-flex; align-items:center; gap:5px; }
