@@ -35,6 +35,11 @@ all on 127.0.0.1. See [`local/README.md`](local/README.md).
   the same `homelab.ai.model`: a request goes to the one that runs; else to one that doesn't
   need a running image tool's card; else to the first (by `homelab.ai.order`). Requests to
   what has to stop for it are answered first.
+- **Model stats**: for each running chat model the page shows what it does (loading, prefill
+  until the first token, then decode), how fast it writes now and wrote the last answer, the
+  last prompt's prefill speed and how much of its context window (`homelab.ai.context`) the
+  last request filled. The switcher measures this on the requests it passes on, and uses the
+  engine's own numbers when the answer has them (llama.cpp's `timings`, Ollama's durations).
 - **Idle stop**: after `IDLE_MINUTES` without requests or GPU load, the chat model stops (only
   it: an image tool on the other card stays); the next request starts it again.
 - **Image tools don't get pushed aside by the API**: a chat request that would need a card
@@ -110,6 +115,7 @@ The labels:
 | `homelab.ai.gpus` | The cards it uses, by nvidia-smi's number: `0`, `1`, `0,1`. Empty: all of them. Give the container the same cards (CDI `nvidia.com/gpu=1`) |
 | `homelab.ai.ram` | The RAM it takes, in GB, for `RAM_GB` |
 | `homelab.ai.group` | Services with the same group never run together (e.g. two placements of one app sharing a data folder) |
+| `homelab.ai.context` | Its context window in tokens: the page shows how much of it the last request filled |
 
 (The `homelab.` prefix is from where it came from; it stays so existing stacks keep working.)
 

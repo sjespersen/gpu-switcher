@@ -120,6 +120,9 @@ lock = threading.Lock()
 api = threading.Condition()
 inflight = {}
 activity = {"last": time.time(), "chat": None, "idle_stop": None, "waiting": 0, "stopping": False}
+# Per service, for the page: what its requests do now (prefill until the first token, then
+# decode, with the tokens streamed so far) and the numbers of the last one that finished.
+stats = {}
 
 
 def docker(method, path):
@@ -320,6 +323,8 @@ def docker_services():
             "gpus": card_list(labels.get("homelab.ai.gpus", "")),
             "ram": float(labels.get("homelab.ai.ram") or 0),
             "group": labels.get("homelab.ai.group", ""),
+            # Its context window in tokens, for the page's "context used".
+            "context": int(labels.get("homelab.ai.context") or 0),
             "state": c["State"],  # running, exited, created, ...
             "health": health,     # starting, healthy, unhealthy or None
             "started": detail["State"].get("StartedAt"),
@@ -366,6 +371,7 @@ def process_services():
             "gpus": card_list(e.get("gpus", "")),
             "ram": float(e.get("ram") or 0),
             "group": e.get("group", ""),
+            "context": int(e.get("context") or 0),
             "state": "running" if running else ("exited" if p is not None else "created"),
             "health": answers(host, port, e.get("health")) if running else None,
             "started": proc_started.get(sid),
@@ -953,9 +959,12 @@ def assembled(raw):
             out["reasoning"] += e.get("thinking") or ""
         if e.get("done"):
             out["finish"] = e.get("done_reason") or out["finish"]
-            out["usage"].update({k: e[k] for k in ("prompt_eval_count", "eval_count") if k in e})
+            out["usage"].update({k: e[k] for k in ("prompt_eval_count", "eval_count",
+                                                   "prompt_eval_duration", "eval_duration") if k in e})
         if isinstance(e.get("usage"), dict):
             out["usage"].update(e["usage"])
+        if isinstance(e.get("timings"), dict):   # llama.cpp's last event
+            out["timings"] = e["timings"]
     return {k: v for k, v in out.items() if v}
 
 
@@ -967,6 +976,87 @@ def tokens(response):
     n_in = u.get("prompt_tokens", u.get("input_tokens", u.get("prompt_eval_count")))
     n_out = u.get("completion_tokens", u.get("output_tokens", u.get("eval_count")))
     return f"{n_in} → {n_out} tokens" if n_in is not None or n_out is not None else ""
+
+
+def stats_begin(sid):
+    with api:
+        st = stats.setdefault(sid, {"active": 0})
+        st["active"] += 1
+        st.update(phase="prefill", since=time.time(), first=None, streamed=0)
+        return st
+
+
+def stats_chunk(st, chunk):
+    """Counts a streamed piece of the answer: one event (OpenAI's or Anthropic's delta, a line
+    of Ollama's) is about one token."""
+    n = chunk.count(b'"delta":') + chunk.count(b'"done":false')
+    if not n:
+        return
+    with api:
+        if st["first"] is None:
+            st["first"] = time.time()
+            st["phase"] = "decode"
+        st["streamed"] += n
+
+
+def stats_end(st, answer, ok):
+    """The finished request's numbers: tokens in and out, prefill and decode speed (the engine's
+    own timings if it sends them, else measured here) and the context it filled."""
+    end = time.time()
+    with api:
+        st["active"] -= 1
+        t0, first, streamed = st["since"], st["first"], st["streamed"]
+        if st["active"] <= 0:
+            st.update(active=0, phase="idle", first=None, streamed=0)
+    if not ok or not isinstance(answer, dict):
+        return
+    u = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
+    u = {**{k: answer[k] for k in ("prompt_eval_count", "eval_count", "prompt_eval_duration",
+                                   "eval_duration") if k in answer}, **u}
+    t = answer.get("timings") if isinstance(answer.get("timings"), dict) else {}
+    n_in = u.get("prompt_tokens", u.get("input_tokens", u.get("prompt_eval_count")))
+    if isinstance(n_in, int):   # Anthropic counts the cached part separately
+        n_in += (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0)
+    n_out = u.get("completion_tokens", u.get("output_tokens", u.get("eval_count")))
+    if t:
+        n_in = (t.get("prompt_n") or 0) + (t.get("cache_n") or 0) if n_in is None else n_in
+        n_out = t.get("predicted_n", n_out)
+    if n_out is None and streamed:
+        n_out = streamed
+    last = {"at": end, "prompt": n_in, "completion": n_out, "seconds": round(end - t0, 2),
+            "ttft": round((first or end) - t0, 2), "cached": t.get("cache_n")}
+    if t.get("prompt_per_second"):
+        last["prefill_tps"] = t["prompt_per_second"]
+    elif u.get("prompt_eval_duration"):
+        last["prefill_tps"] = u.get("prompt_eval_count", 0) / (u["prompt_eval_duration"] / 1e9)
+    elif n_in and first:
+        last["prefill_tps"] = n_in / max(first - t0, 0.01)
+    if t.get("predicted_per_second"):
+        last["decode_tps"] = t["predicted_per_second"]
+    elif u.get("eval_duration"):
+        last["decode_tps"] = (n_out or 0) / (u["eval_duration"] / 1e9)
+    elif n_out and first and end - first > 0.2:
+        last["decode_tps"] = n_out / (end - first)
+    for k in ("prefill_tps", "decode_tps"):
+        if k in last:
+            last[k] = round(last[k], 1)
+    if n_in is not None or n_out is not None:
+        last["context"] = (n_in or 0) + (n_out or 0)
+    with api:
+        st["last"] = last
+
+
+def stats_now(sid):
+    """For the status: the live part with the decode speed so far."""
+    with api:
+        st = dict(stats.get(sid) or {})
+    if not st:
+        return None
+    if st.get("phase") == "decode" and st.get("first"):
+        took = time.time() - st["first"]
+        st["live_tps"] = round(st["streamed"] / took, 1) if took > 0.5 else None
+    st.pop("first", None)
+    return st
 
 
 def text_of(content):
@@ -1200,7 +1290,7 @@ class Handler(BaseHTTPRequestHandler):
             with api:
                 inflight[target["id"]] = inflight.get(target["id"], 0) + 1
             try:
-                self.proxy(target["host"], target["port"], self.path, body, entry)
+                self.proxy(target["host"], target["port"], self.path, body, entry, target["id"])
             finally:
                 with api:
                     inflight[target["id"]] -= 1
@@ -1242,17 +1332,20 @@ class Handler(BaseHTTPRequestHandler):
         with api:
             inflight["ollama"] = inflight.get("ollama", 0) + 1
         try:
-            self.proxy(OLLAMA_HOST, OLLAMA_PORT, path, body, entry)
+            self.proxy(OLLAMA_HOST, OLLAMA_PORT, path, body, entry, "ollama")
         finally:
             with api:
                 inflight["ollama"] -= 1
                 api.notify_all()
 
-    def proxy(self, host, port, path, body, log=None):
+    def proxy(self, host, port, path, body, log=None, sid=None):
         """Passes the request on and streams the answer back as it comes (server-sent events).
-        With log (an API log entry), keeps a copy of the answer and writes the entry at the end."""
+        With log (an API log entry), keeps a copy of the answer and writes the entry at the end;
+        with sid, counts it in that service's stats."""
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
-        if log is not None:
+        keep = log is not None or sid is not None
+        st = stats_begin(sid) if sid is not None else None
+        if keep:
             headers.pop("Accept-Encoding", None)   # the copy for the log stays readable
             headers.pop("accept-encoding", None)
         conn = http.client.HTTPConnection(host, port, timeout=3600)
@@ -1261,6 +1354,8 @@ class Handler(BaseHTTPRequestHandler):
             resp = conn.getresponse()
         except OSError as e:
             conn.close()
+            if st is not None:
+                stats_end(st, None, False)
             api_log(log, 502, error=f"{host}: {e}")
             return self.api_error(502, f"{host}: {e}")
         kept, size, error = [], 0, None
@@ -1273,9 +1368,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
             while chunk := resp.read1(65536):
-                if log is not None and size < MAX_LOGGED:
+                if keep and size < MAX_LOGGED:
                     kept.append(chunk)
                     size += len(chunk)
+                if st is not None:
+                    stats_chunk(st, chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except OSError:
@@ -1283,7 +1380,7 @@ class Handler(BaseHTTPRequestHandler):
             error = "the client went away"
         finally:
             conn.close()
-            if log is not None:
+            if keep:
                 raw = b"".join(kept)
                 ctype = resp.getheader("Content-Type", "")
                 if "event-stream" in ctype or "ndjson" in ctype:
@@ -1295,6 +1392,8 @@ class Handler(BaseHTTPRequestHandler):
                         answer = raw.decode("utf-8", "replace")
                 if resp.status >= 400 and not error:
                     error = short(answer_of(answer) or (answer.get("error") if isinstance(answer, dict) else answer), 200)
+                if st is not None:
+                    stats_end(st, answer, resp.status < 400 and not error)
                 api_log(log, resp.status, answer, error)
 
     def service_ui(self):
@@ -1416,6 +1515,7 @@ class Handler(BaseHTTPRequestHandler):
                         s["installed"] = None
             for s in svcs:
                 s.pop("_entry", None)  # the command and its env stay on the box
+                s["stats"] = stats_now(s["id"])
                 # When the idle watcher stops it (for the page's countdown), if nothing comes first.
                 if IDLE_MINUTES > 0 and s["models"] and s["state"] == "running":
                     s["idle_stop_at"] = max(activity["last"], started_at(s)) + IDLE_MINUTES * 60
