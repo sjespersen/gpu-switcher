@@ -51,6 +51,11 @@
   <h3 class="subhead">Single services</h3>
   <div class="choices" id="choices"></div>
 </dialog>
+<dialog id="swap-dlg" aria-labelledby="swap-title">
+  <div class="dlg-head"><h2 id="swap-title">Change</h2><span class="hint" id="swap-hint"></span>
+    <button class="small" id="close-swap">Close</button></div>
+  <div class="choices" id="swap-choices"></div>
+</dialog>
 <footer>Updates every 3 seconds.</footer>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -232,10 +237,12 @@ function runningCard(h, d) {
   else if (h.models && h.models.length) meta.push(`<code>${esc(h.models[0])}</code>`);
   if (!h.always_on && startedAt(h)) meta.push(`<span>up <b data-since="${startedAt(h)}"></b></span>`);
   if (h.idle_stop_at && !d.requests) meta.push(`<span>idle stop in <b data-until="${h.idle_stop_at}"></b></span>`);
+  const alts = swapChoices(h, d).length;
   return `<div class="now k-${k}"><div class="now-icon">${icon(k)}</div>
     <div class="now-main"><div class="now-state ${cls}"><span class="dot ${cls === 'on' ? 'pulse' : ''}"></span>${text}</div>
       <div class="now-title">${esc(h.title)}</div><div class="now-meta">${meta.join('')}</div></div>
-    <div class="now-actions">${openLink(h)}<button onclick="stopOne('${esc(h.id)}')" ${d.switching ? 'disabled' : ''}>${h.always_on ? 'Unload' : 'Stop'}</button></div></div>`;
+    <div class="now-actions">${openLink(h)}${alts ? `<button title="Run something else on ${esc(cardsOf(h, d) || 'its cards')}, the rest stays" ${d.switching ? 'disabled' : ''} onclick="openSwap('${esc(h.id)}')">Change</button>` : ''}<button onclick="stopOne('${esc(h.id)}')" ${d.switching ? 'disabled' : ''}>${h.always_on ? 'Unload' : 'Stop'}</button></div>
+    ${h.models && h.models.length && !h.always_on ? miniStats(h) : ''}</div>`;
 }
 function nowCard(d, svcs) {
   const p = plan(d);
@@ -323,31 +330,44 @@ const section = (ic, name, sub, body) =>
   `<div class="vsec"><div class="vhead">${icon(ic)}<span class="vname">${name}</span><span class="vsub">${sub}</span></div><div class="vgrid">${body}</div></div>`;
 // The biggest card first: that's the one the models are sized for.
 const byMemory = cards => [...cards].sort((a, b) => b.total - a.total || a.index - b.index);
-// A chat model's numbers: what it does now, how fast it writes (live, and the last answer's) and
-// how much of its context window the last request filled.
+// A chat model's numbers in one row: context the last request filled, how fast it writes (now
+// while it does, else the last answer) and how fast it read the last prompt.
 const tps = v => v == null ? '–' : v >= 100 ? Math.round(v) : v.toFixed(1);
 const kTok = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : String(n);
-function modelStats(s) {
-  const st = s.stats || {}, last = st.last || {}, phase = st.phase || 'idle';
+function miniStats(s) {
+  const st = s.stats || {}, last = st.last || {}, max = s.context, used = last.context;
   const hist = H['tps' + s.id] || [], peak = Math.max(20, ...hist);
-  let state = metric('Status', s.health === 'starting' ? 'loading' : phase === 'busy' ? 'working' : phase,
-    '', s.health === 'starting' ? 'the model is loading'
-      : phase === 'idle' ? (last.at ? `last answer <span data-since="${last.at}"></span> ago` : 'no request yet')
-      : `${st.active > 1 ? st.active + ' requests · ' : ''}for <span data-since="${st.since}"></span>`, phase === 'idle' ? '' : 'warn');
-  const decode = metric('Decode', phase === 'decode' && st.live_tps ? `${tps(st.live_tps)}<small> tok/s</small>`
-      : last.decode_tps ? `${tps(last.decode_tps)}<small> tok/s</small>` : '–',
-    spark(hist, peak), phase === 'decode' ? `now · ${st.streamed} tokens so far`
-      : last.decode_tps ? `last answer · ${last.completion ?? '?'} tokens in ${last.seconds} s` : 'tokens per second, writing');
-  const prefill = metric('Prefill', last.prefill_tps ? `${tps(last.prefill_tps)}<small> tok/s</small>` : '–', '',
-    last.prompt != null ? `${kTok(last.prompt)} in${last.cached ? ` (${kTok(last.cached)} cached)` : ''} · 1st token ${last.ttft} s`
-      : 'tokens per second, reading');
-  const max = s.context, used = last.context;
-  const ctx = metric('Context', used != null ? `${kTok(used)}<small>${max ? ' / ' + kTok(max) : ''}</small>` : max ? `–<small> / ${kTok(max)}</small>` : '–',
-    `<div class="bar"><i style="width:${max && used ? Math.min(100, 100 * used / max) : 0}%"></i></div>`,
-    used != null && max ? `${Math.round(100 * used / max)}% of the window, last request` : max ? 'window size' : 'window size unknown',
-    'wide ' + (max && used ? lvl(100 * used / max, 75, 90) : ''));
-  return ctx + state + decode + prefill;
+  const pct = max && used ? Math.min(100, 100 * used / max) : 0;
+  const live = st.phase === 'decode' && st.live_tps;
+  const cell = (label, value, extra, title) => `<div class="ms" title="${esc(title || '')}"><span class="ms-l">${label}</span><span class="ms-v">${value}</span>${extra || ''}</div>`;
+  return `<div class="mstats">
+    ${cell('Context', used != null ? `${kTok(used)}<small>${max ? ' / ' + kTok(max) : ''}</small>` : max ? `–<small> / ${kTok(max)}</small>` : '–',
+      `<div class="bar thin"><i class="${lvl(pct, 75, 90)}" style="width:${pct}%"></i></div>`, 'of the context window, last request')}
+    ${cell(live ? 'Decode now' : 'Decode', live ? `${tps(st.live_tps)}<small> tok/s</small>` : last.decode_tps ? `${tps(last.decode_tps)}<small> tok/s</small>` : '–',
+      spark(hist, peak), live ? `${st.streamed} tokens so far` : last.completion != null ? `last answer: ${last.completion} tokens in ${last.seconds} s` : '')}
+    ${cell('Prefill', last.prefill_tps ? `${tps(last.prefill_tps)}<small> tok/s</small>` : '–',
+      `<span class="ms-n">${last.ttft != null && last.prompt != null ? `${kTok(last.prompt)} in · ${last.ttft} s` : ''}</span>`,
+      last.cached ? `${kTok(last.cached)} of the prompt came from the cache` : 'last prompt')}
+  </div>`;
 }
+// What can take a running service's place: services on (some of) its cards that don't need a
+// card something else running holds. Using one stops only this service.
+function swapChoices(h, d) {
+  if (!h.gpus) return [];
+  const others = d.services.filter(o => o.id !== h.id && holds(o));
+  return d.services.filter(s => s.id !== h.id && !s.variant_of && s.gpus && s.gpus.every(g => h.gpus.includes(g))
+    && !holds(s) && !others.some(o => clash(o, s)));
+}
+let SWAP = null;
+const swapDlg = () => document.getElementById('swap-dlg');
+function renderSwap(d) {
+  const h = SWAP && d.services.find(s => s.id === SWAP);
+  if (!h || !holds(h)) { if (swapDlg().open) swapDlg().close(); SWAP = null; return; }
+  document.getElementById('swap-title').textContent = `Instead of ${h.title}`;
+  document.getElementById('swap-hint').textContent = `On ${cardsOf(h, d) || 'its cards'}; everything else keeps running`;
+  setHTML('swap-choices', swapChoices(h, d).map(s => choice(s, d)).join(''));
+}
+function openSwap(id) { SWAP = id; renderSwap(LAST); swapDlg().showModal(); }
 function vitals(d) {
   const cards = byMemory(d.gpus || []), c = d.cpu || {}, m = d.ram, out = [];
   for (const g of cards) {
@@ -359,9 +379,6 @@ function vitals(d) {
         `${gb(g.total - g.used)} GB free`, 'wide')
       + loadMetric(g.util, H['gpu' + g.index], '', (g.util >= 10 ? 'working' : 'idle') + watts(g.power))
       + temp(g.temp, 75, 83)));
-  }
-  for (const s of (d.services || []).filter(s => s.models && s.models.length && s.state === 'running')) {
-    out.push(section(kindOf(s), esc(s.title), esc(cardsOf(s, d) || 'model'), modelStats(s)));
   }
   out.push(section('cpu', 'CPU', (c.cores || '?') + ' threads',
     loadMetric(c.load, H.cpu, 'cpu', (c.load == null ? '' : c.load >= 85 ? 'busy' : c.load >= 10 ? 'working' : 'idle') + watts(c.power))
@@ -435,6 +452,7 @@ async function load() {
   // A variant (another model on the same engine) has no card: requests naming its model start it.
   setHTML('choices', svcs.filter(s => !s.variant_of).map(s => choice(s, d)).join(''));
   setHTML('vitals', vitals(d));
+  if (SWAP) renderSwap(d);
   // One name per model, even with several placements of it.
   setHTML('api-models', [...new Set(svcs.filter(s => s.models && s.models.length).map(s => s.models[0]))]
     .map(m => `<span class="chip">${esc(m)}</span>`).join(''));
@@ -540,7 +558,7 @@ async function post(body) {
   load();
 }
 const dlg = document.getElementById('switch-dlg');
-const go = id => { dlg.close(); post({service: id}); };
+const go = id => { dlg.close(); if (swapDlg().open) swapDlg().close(); SWAP = null; post({service: id}); };
 const mode = id => { dlg.close(); post({scenario: id}); };
 const stopOne = id => post({stop: id});
 // --- The mode editor: built when opened and not redrawn by the 3-second updates, so typing
@@ -620,8 +638,11 @@ async function saveModes() {
 document.getElementById('edit-modes').onclick = openEditor;
 document.getElementById('open-switch').onclick = () => dlg.showModal();
 document.getElementById('close-switch').onclick = () => dlg.close();
+document.getElementById('close-swap').onclick = () => { swapDlg().close(); SWAP = null; };
 // A click on the dimmed backdrop closes it too (the click lands on the dialog element itself).
 dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
 dlg.addEventListener('close', () => { if (EDIT) closeEditor(); });
+swapDlg().addEventListener('click', e => { if (e.target === swapDlg()) swapDlg().close(); });
+swapDlg().addEventListener('close', () => { SWAP = null; });
 loadLinks().then(load); setInterval(load, 3000);
 </script></main></body></html>

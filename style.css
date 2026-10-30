@@ -208,8 +208,22 @@ footer { margin-top: 14px; color: var(--faint); font-size: 11px; }
 .epick { display: grid; gap: 4px 12px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); font-size: 13px; }
 .epick label { display: flex; gap: 6px; align-items: baseline; } .epick .hint { margin-left: auto; }
 [hidden] { display: none !important; }
-dialog#switch-dlg { width: min(960px, calc(100% - 32px)); max-height: 86vh; overflow: auto; padding: 16px 18px;
+dialog#switch-dlg, dialog#swap-dlg { width: min(960px, calc(100% - 32px)); max-height: 86vh; overflow: auto; padding: 16px 18px;
   background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; }
-dialog#switch-dlg::backdrop { background: rgba(0, 0, 0, .55); }
+dialog#switch-dlg::backdrop, dialog#swap-dlg::backdrop { background: rgba(0, 0, 0, .55); }
 .dlg-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
 .dlg-head .hint { flex: 1; }
+/* A running model's numbers, in one row under its name. */
+.now { flex-wrap:wrap; }
+.mstats { flex-basis:100%; display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:4px 22px; margin-top:-2px; padding-top:10px;
+  border-top:1px solid color-mix(in srgb, var(--ink) 10%, transparent); }
+.ms { min-width:0; display:grid; grid-template-columns:auto 1fr; align-items:baseline; column-gap:6px; }
+.ms-l { font-size:11px; color:var(--muted); white-space:nowrap; }
+.ms-v { font-size:14px; font-weight:620; text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.ms > :nth-child(n+3) { grid-column:1 / -1; }
+.ms .spark { height:14px; margin-top:3px; }
+.ms-n { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:17px; }
+.bar.thin { height:4px; margin-top:8px; }
+.bar.thin i.warn { background:var(--warn); } .bar.thin i.bad { background:var(--bad); }
+@media (max-width: 560px) { .mstats { grid-template-columns:1fr 1fr; } .ms:first-child { grid-column:1 / -1; } }
+dialog#swap-dlg { width: min(720px, calc(100% - 32px)); }

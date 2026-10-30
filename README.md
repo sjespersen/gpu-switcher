@@ -35,7 +35,10 @@ all on 127.0.0.1. See [`local/README.md`](local/README.md).
   the same `homelab.ai.model`: a request goes to the one that runs; else to one that doesn't
   need a running image tool's card; else to the first (by `homelab.ai.order`). Requests to
   what has to stop for it are answered first.
-- **Model stats**: for each running chat model the page shows what it does (loading, prefill
+- **Change**: each running service's card has a Change button listing what can take its place
+  on its cards without touching anything else (e.g. in a mode, another model on the 3060 while
+  SwarmUI keeps the 5060 Ti).
+- **Model stats**: for each running chat model its card shows what it does (loading, prefill
   until the first token, then decode), how fast it writes now and wrote the last answer, the
   last prompt's prefill speed and how much of its context window (`homelab.ai.context`) the
   last request filled. The switcher measures this on the requests it passes on, and uses the
