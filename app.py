@@ -791,7 +791,8 @@ def chat_target(model, all_services):
         running = [s for s in found if s["state"] == "running"]
         if running:
             return running[0]
-        images = [o for o in all_services if o["kind"] == "image" and o["state"] in ("running", "restarting")]
+        # Leave a running image tool or speech engine alone if a placement allows it.
+        images = [o for o in all_services if o["kind"] in ("image", "audio") and o["state"] in ("running", "restarting")]
         free = [s for s in found if not any(conflicts(s, o) for o in images)]
         return (free or found)[0]
 

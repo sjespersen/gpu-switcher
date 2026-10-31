@@ -33,7 +33,7 @@ all on 127.0.0.1. See [`local/README.md`](local/README.md).
   model loads (up to an hour, for a first download), and the answer streams as it comes.
   One model can have several services (placements: both cards, or one card beside images) with
   the same `homelab.ai.model`: a request goes to the one that runs; else to one that doesn't
-  need a running image tool's card; else to the first (by `homelab.ai.order`). Requests to
+  need the card of a running image tool or speech engine; else to the first (by `homelab.ai.order`). Requests to
   what has to stop for it are answered first.
 - **Change**: each running service's card has a Change button listing what can take its place
   on its cards without touching anything else (e.g. in a mode, another model on the 3060 while
