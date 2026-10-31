@@ -804,6 +804,11 @@ def chat_target(model, all_services):
         if starts:
             longest = max(n for n, _ in starts)
             return best([s for n, s in starts if n == longest])
+    # Without a name that matches, only chat models: a speech engine (kind audio) runs only
+    # when a request names it.
+    chat = [s for s in chat if s["kind"] != "audio"]
+    if not chat:
+        return None
     for s in chat:
         if s["state"] == "running":
             return s
@@ -1274,7 +1279,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/v1/models":
             return self.json({"object": "list", "data": [
                 {"id": s["models"][0], "object": "model", "owned_by": "gpu-switcher", "service": s["id"],
-                 "loaded": s["state"] == "running"} for s in all_services if s["models"]]})
+                 "loaded": s["state"] == "running"} for s in all_services if s["models"] and s["kind"] != "audio"]})
         body = self.read_body() if self.command in ("POST", "PUT", "PATCH") else b""
         if body is None:
             return self.api_error(413, "request too large")

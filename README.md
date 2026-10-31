@@ -106,7 +106,7 @@ The labels:
 |---|---|
 | `homelab.ai.title` | Name on the page; the switcher manages only containers that have it |
 | `homelab.ai.about` | One line under the name |
-| `homelab.ai.kind` | `chat` (default) or `image` |
+| `homelab.ai.kind` | `chat` (default), `image`, or `audio`: a speech engine (TTS) with the same API routing as a chat model, but left out of `/v1/models` and started only by a request that names it |
 | `homelab.ai.model` | The model names API requests use, comma-separated (the first is listed in `/v1/models`) |
 | `homelab.ai.port` | Its API port in the compose network (default 8080) |
 | `homelab.ai.order` | Position on the page |

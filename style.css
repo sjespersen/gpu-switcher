@@ -1,12 +1,12 @@
 :root { --bg:#f4f4f1; --card:#fff; --ink:#1c1c1a; --muted:#6b6b64; --faint:#9a9a92; --line:#e4e4de;
   --soft:#efefea; --accent:#2f6f4f; --accent-soft:#e3efe8; --warn:#a36f00; --warn-soft:#f7ecd2;
   --bad:#b03a3a; --bad-soft:#f6e1e1; --on-accent:#fff;
-  --chat:#2f6f4f; --chat-soft:#e3efe8; --web:#2f62a3; --web-soft:#e2eaf6; --image:#7b4bb0; --image-soft:#eee5f7;
+  --chat:#2f6f4f; --chat-soft:#e3efe8; --web:#2f62a3; --web-soft:#e2eaf6; --image:#7b4bb0; --image-soft:#eee5f7; --audio:#b8621b; --audio-soft:#f6e8dc;
   --cpu:#2f62a3; --rest:#c9c9c1; --orange:#b8621b; --red:#b33f4a; --pink:#b0407e; --teal:#1d7f80; color-scheme: light; }
 @media (prefers-color-scheme: dark) { :root { --bg:#121211; --card:#1b1b19; --ink:#ecece7; --muted:#a0a098;
   --faint:#77776f; --line:#2e2e2a; --soft:#262623; --accent:#72c296; --accent-soft:#1d3127; --warn:#e3b350;
   --warn-soft:#3a2f17; --bad:#e57b7b; --bad-soft:#3b2020; --on-accent:#0f2419;
-  --chat:#72c296; --chat-soft:#1d3127; --web:#7fa9e6; --web-soft:#1c2a3e; --image:#bd96ea; --image-soft:#2d2240;
+  --chat:#72c296; --chat-soft:#1d3127; --web:#7fa9e6; --web-soft:#1c2a3e; --image:#bd96ea; --image-soft:#2d2240; --audio:#eb9a55; --audio-soft:#3a2a1c;
   --cpu:#7fa9e6; --rest:#4a4a44; --orange:#eb9a55; --red:#ec7f88; --pink:#e886bf; --teal:#5cc4c4; color-scheme: dark; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -43,12 +43,13 @@ small { font-size: .62em; font-weight: 500; color: var(--muted); }
 .now.k-chat { background:var(--chat-soft); border-color:color-mix(in srgb, var(--chat) 35%, transparent); }
 .now.k-web { background:var(--web-soft); border-color:color-mix(in srgb, var(--web) 35%, transparent); }
 .now.k-image { background:var(--image-soft); border-color:color-mix(in srgb, var(--image) 35%, transparent); }
+.now.k-audio { background:var(--audio-soft); border-color:color-mix(in srgb, var(--audio) 35%, transparent); }
 .now.free { background:transparent; border:1px dashed var(--line); }
 .now-icon { width:46px; height:46px; border-radius:12px; display:grid; place-items:center; flex-shrink:0;
   background:var(--card); color:var(--muted); }
 .now-icon .ic { width:24px; height:24px; }
 .k-chat .now-icon, .k-chat .kicon { color:var(--chat); } .k-web .now-icon, .k-web .kicon { color:var(--web); }
-.k-image .now-icon, .k-image .kicon { color:var(--image); }
+.k-image .now-icon, .k-image .kicon { color:var(--image); } .k-audio .now-icon, .k-audio .kicon { color:var(--audio); }
 .now.switching .now-icon { animation: breathe 1.6s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity:.55; } }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -83,7 +84,7 @@ small { font-size: .62em; font-weight: 500; color: var(--muted); }
 .choice.target { border-color:var(--warn); box-shadow: 0 0 0 1px var(--warn) inset; }
 .choice-top { display:flex; align-items:center; gap:8px; }
 .kicon { width:28px; height:28px; border-radius:8px; display:grid; place-items:center; flex-shrink:0; }
-.k-chat .kicon { background:var(--chat-soft); } .k-web .kicon { background:var(--web-soft); } .k-image .kicon { background:var(--image-soft); }
+.k-chat .kicon { background:var(--chat-soft); } .k-web .kicon { background:var(--web-soft); } .k-image .kicon { background:var(--image-soft); } .k-audio .kicon { background:var(--audio-soft); }
 .kicon .ic { width:16px; height:16px; }
 .choice-title { font-weight:620; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tag { font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); }
